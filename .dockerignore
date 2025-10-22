@@ -1,0 +1,11 @@
+.git
+.gitignore
+.dvc
+.dvcignore
+.venv
+__pycache__
+*.pyc
+logs/
+outputs/
+prepared/
+data/

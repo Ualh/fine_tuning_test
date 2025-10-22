@@ -1,0 +1,82 @@
+paths:
+  data_root: data
+  prepared_dir: prepared
+  outputs_dir: outputs
+  logs_dir: logs
+  huggingface_cache: "${USERPROFILE}\\.cache\\huggingface"
+  models_mount: "\\\\pc-27327\\D\\LLM"
+  run_metadata_file: logs/latest.txt
+
+preprocess:
+  dataset_name: tatsu-lab/alpaca
+  sample_size: 2000
+  filter_langs:
+    - en
+    - fr
+  test_size: 0.2
+  cutoff_len: 2048
+  seed: 215
+  save_splits: true
+  max_workers: 4
+  pack_sequences: true
+
+train:
+  base_model: Qwen/Qwen2.5-0.5B
+  cutoff_len: 2048
+  batch_size: 4
+  gradient_accumulation: 8
+  epochs: 1
+  learning_rate: 0.00002
+  min_learning_rate: 0.000005
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  lr_scheduler: cosine
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  gradient_checkpointing: true
+  bf16: true  # GPU-friendly default; switch to false when forcing CPU execution
+  fp16: true  # GPU-friendly default; switch to false when forcing CPU execution
+  logging_steps: 20
+  eval_steps: 100
+  # Keep >=3 for smoke checks; set to null for full-session runs once validated.
+  max_steps: null  # Full training pass enabled; switch back to 3 for quick smoke runs
+  resume_from: null
+
+export:
+  include_adapter_weights: true
+  resume_from: null
+
+eval:
+  cutoff_len: 2048
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  prompts:
+    - instruction: "Donne un bref plan de projet en trois étapes pour intégrer DVC dans un pipeline MLOps."
+      language: fr
+      max_sentences: 3
+    - instruction: "List three tips to monitor GPU memory usage during fine-tuning."
+      language: en
+      max_sentences: 4
+  resume_from: null
+
+serve:
+  host: 0.0.0.0
+  port: 8080
+  max_model_len: 2048
+  served_model_name: Qwen2.5-0.5B-SFT
+  resume_from: null
+
+logging:
+  console_level: INFO
+  file_level: DEBUG
+  tqdm_refresh_rate: 1.0
