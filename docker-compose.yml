@@ -9,7 +9,7 @@ services:
     working_dir: /app
     tty: true
     stdin_open: true
-    # gpus: all
+    gpus: all
     shm_size: "32gb"
     ipc: "host"
     ulimits:
@@ -30,9 +30,9 @@ services:
       HF_HUB_DISABLE_XET: "1"
       HF_HUB_ENABLE_XET: "0"
       GIT_SSL_NO_VERIFY: "1"
-      # PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:128"
-      # TORCH_CUDA_ARCH_LIST: "8.9"
-      # NCCL_P2P_DISABLE: "1"
+      PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:128"
+      TORCH_CUDA_ARCH_LIST: "8.9"
+      NCCL_P2P_DISABLE: "1"
       WANDB_MODE: "offline"
     volumes:
       - .:/app
@@ -45,12 +45,13 @@ services:
     image: vllm/vllm-openai:latest
     container_name: vllm-qwen25-05b
     runtime: nvidia
+    gpus: all
     privileged: true
     ipc: host
     environment:
       VLLM_CACHE_ROOT: /models/cache
-      VLLM_TARGET_DEVICE: cpu #cuda
-      # NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      VLLM_TARGET_DEVICE: cuda # use GPU for serving
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       CURL_CA_BUNDLE: ""
       REQUESTS_CA_BUNDLE: ""
       SSL_CERT_FILE: ""
