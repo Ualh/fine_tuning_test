@@ -25,158 +25,100 @@ services:
   qwen25-05b:
     # ...
     # gpus: all        # <= UNCOMMENT this line
-    # or use the devices reservation if you prefer:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - capabilities: [gpu]
-```
-- For `vllm-server`, keep `runtime: nvidia` and switch device to GPU if you want GPU serving:
-```yaml
-  vllm-server:
-    runtime: nvidia
-    # gpus: all        # optionally add
-    environment:
-      VLLM_TARGET_DEVICE: cuda  # change from 'cpu' to 'cuda' for GPU serving
-```
+    # Fine-tuning Guide (A → Z)
 
-Save the file.
+    Short, up-to-date walkthrough for this repository on Windows + Docker.
 
-## 3) Flip config to a “full run”
+    ## 1) Prereqs
+    - Windows 11/10, Docker Desktop (WSL2 engine enabled)
+    - Optional GPU: recent NVIDIA driver; Docker Desktop GPU support enabled
+    - HF token if the model/dataset is gated
 
-Open config.yaml and set:
-- For full epochs, remove the smoke cap:
-```yaml
-train:
-  # ...
-  max_steps: null
-```
-- Keep `bf16: true` and `fp16: true` for GPU; on Ada/Ampere this is fine. If you hit precision issues, turn off `fp16` first and keep `bf16` on.
+    Quick GPU checks (optional):
+    ```powershell
+    nvidia-smi
+    docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
+    ```
 
-Tip: If you need to fit VRAM, reduce `batch_size` and increase `gradient_accumulation` proportionally. Gradient checkpointing is already enabled.
+    ## 2) Configure once
+    Create `.env` next to `docker-compose.yml`:
+    ```
+    HF_TOKEN=hf_XXXXXXXXXXXXXXXXXXXXXXXX
+    ```
+    Review `config.yaml` and adjust as needed. For full-epoch runs, ensure:
+    ```yaml
+    train:
+      max_steps: null
+    ```
 
-## 4) Bring up the training container and sanity-check CUDA
+    GPU vs CPU:
+    - Training (`sft`): `docker-compose.yml` should have `gpus: all` for GPU. Set `train.bf16: true` (and optionally `fp16: true`). To force CPU, remove `gpus: all` and set `bf16: false`, `fp16: false`.
+    - Serving (`vllm-server`): `VLLM_TARGET_DEVICE: cuda` for GPU (default here) or `cpu` for CPU.
 
-From the repo root:
-```powershell
-.\run_pipeline.bat up
-```
+    ## 3) Build and start
+    ```powershell
+    .\run_pipeline.bat build
+    .\run_pipeline.bat up
+    ```
 
-GPU sanity inside the container:
-```powershell
-docker exec -it qwen25-05b bash -lc "nvidia-smi"
-docker exec -it qwen25-05b bash -lc "python3 - << 'PY'
-import torch
-print('torch:', torch.__version__, 'cuda:', torch.version.cuda)
-print('cuda_available:', torch.cuda.is_available())
-if torch.cuda.is_available():
-    print('device:', torch.cuda.get_device_name(0))
-PY"
-```
-You should see your GPU name and `cuda_available: True`.
+    Optional shell inside the training container:
+    ```powershell
+    .\run_pipeline.bat bash
+    ```
 
-## 5) Preprocess SFT data
+    ## 4) Run the pipeline
+    All stages read from `config.yaml`. You can override most options via CLI flags if needed.
 
-This will create chat-formatted splits in `prepared/` based on your config (2k EN/FR subset):
-```powershell
-.\run_pipeline.bat preprocess-sft
-```
-Outputs:
-- Data at `prepared/alpaca_2k_en` (by default)
-- Logs under `logs/log_vXX_.../preprocess/`
+    Preprocess (creates JSONL splits under `prepared/`):
+    ```powershell
+    .\run_pipeline.bat preprocess-sft
+    ```
 
-## 6) Fine-tune on GPU
+    Fine-tune (writes adapters and trainer state under `outputs/`):
+    ```powershell
+    .\run_pipeline.bat finetune-sft
+    ```
 
-Run with current defaults (Qwen2.5-0.5B, LoRA, packing, bf16/fp16):
-```powershell
-.\run_pipeline.bat finetune-sft
-```
+    Export merged model (writes to `outputs/.../merged`):
+    ```powershell
+    .\run_pipeline.bat export-merged
+    ```
 
-Notes:
-- If you paused and want to resume, pass `RESUME_FROM=outputs/autoif_qwen25_05b_lora/checkpoint-XXXX`.
-- Watch `logs/log_vXX_.../train/run.log` and your console for progress.
-- Tuning for VRAM:
-  - If OOM: lower `BATCH` or increase `GRAD_ACCUM` in run_pipeline.bat overrides: e.g. `BATCH=2 GRAD_ACCUM=16`.
-  - Gradient checkpointing is already on for memory savings.
+    Evaluate (quick sanity metrics and prompt generations):
+    ```powershell
+    .\run_pipeline.bat eval-sft
+    ```
 
-## 7) Export merged checkpoint
+    ## 5) Serve with vLLM
+    The server mounts `./outputs` to `/models` and uses `serve.served_model_relpath` to locate the merged model.
+    ```powershell
+    .\run_pipeline.bat serve-vllm
+    ```
+    By default this exposes http://localhost:8080 (configurable via `serve.host`/`serve.port`).
 
-This merges LoRA adapters into a single Hugging Face model folder:
-```powershell
-.\run_pipeline.bat export-merged
-```
-Result: `outputs/autoif_qwen25_05b_lora/merged`
+    Smoke-test the endpoint:
+    ```powershell
+    python -m src.cli.main smoke-test --prompt "Résume AC215 en trois points."
+    ```
 
-## 8) Quick evaluation
+    ## 6) Useful helpers
+    Print resolved runtime (paths, compose project, served model path):
+    ```powershell
+    python -m src.cli.main print-runtime --format json
+    ```
 
-Runs a few prompts from config.yaml against the merged model:
-```powershell
-.\run_pipeline.bat eval-sft
-```
-Outputs go to `outputs/autoif_qwen25_05b_lora/eval` and logs under `logs/`.
+    Start/stop containers:
+    ```powershell
+    .\run_pipeline.bat up
+    .\run_pipeline.bat down
+    ```
 
-## 9) Serve with vLLM and test
+    Logs are under `logs/log_vXX_.../<stage>/` and the latest path is stored in `logs/latest.txt`.
 
-Two options:
-
-- GPU serving (recommended):
-  - In docker-compose.yml, set `VLLM_TARGET_DEVICE: cuda` and ensure GPU is enabled (see step 2).
-- CPU serving (already configured by default): no changes needed.
-
-vLLM expects the merged model under the mount `\\pc-27327\D\LLM` mapped to `/models`. Copy your merged output there (or change the compose mount to point to your local `outputs/` folder).
-
-Copy merged to the share (example path; adjust if needed):
-```powershell
-# Create the target folder and copy merged model
-$target="\\pc-27327\D\LLM\autoif_qwen25_05b_lora\merged"
-New-Item -ItemType Directory -Force -Path $target | Out-Null
-Copy-Item -Recurse -Force .\outputs\autoif_qwen25_05b_lora\merged\* $target\
-```
-
-Start vLLM:
-```powershell
-docker compose up -d vllm-server
-```
-
-Sanity test (simple prompt via your CLI, if you wired a smoke-test command):
-```powershell
-python -m src.cli.main smoke-test --prompt "Résume AC215 en trois points."
-```
-Or use an OpenAI-compatible client against http://localhost:8080 (served model name is `Qwen2.5-0.5B-SFT` per compose).
-
-## 10) Hugging Face token and SSL tips
-
-- Put your token in a `.env` file next to docker-compose.yml as `HF_TOKEN=hf_...`. The compose passes it as env.
-- SSL is already disabled in the Dockerfile, compose, and Python utils to bypass corporate TLS interception.
-
-## Optional: Preflight tests (fast)
-
-Run these locally before heavy stages:
-```powershell
-pytest tests/test_hf_connectivity.py
-pytest tests/test_pipeline_smoke.py
-```
-
-## Troubleshooting
-
-- Container can’t see GPU:
-  - Ensure `gpus: all` is set for `qwen25-05b`
-  - `docker exec -it qwen25-05b bash -lc "nvidia-smi"`
-  - Update NVIDIA driver / Docker Desktop; verify `docker run --gpus all nvidia/cuda:... nvidia-smi` works on host
-- OOM during training:
-  - Reduce `BATCH`, increase `GRAD_ACCUM`, keep gradient checkpointing enabled
-  - Ensure `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128` is set (it is in the Dockerfile)
-- vLLM can’t find model:
-  - Ensure the merged folder exists under the network share mapped to `/models` OR change the volume to mount your local `outputs/` directly
-
-## Quick recap
-
-- You’ve already built the image. Next steps:
-  1) Enable GPUs in compose (uncomment `gpus: all` and optionally set vLLM to `cuda`)
-  2) Set `train.max_steps: null` in config.yaml for a full run
-  3) `.run_pipeline.bat up`
-  4) `.run_pipeline.bat preprocess-sft`
+    ## 7) Tips
+    - Out-of-memory? Lower `train.batch_size`, raise `train.gradient_accumulation`, keep `train.gradient_checkpointing: true`.
+    - Precision hiccups? Turn off `fp16` first; keep `bf16` if on Ampere/Ada.
+    - SSL/proxy issues are already handled (verification disabled). Remove those envs later if not needed.
   5) `.run_pipeline.bat finetune-sft`
   6) `.run_pipeline.bat export-merged`
   7) Copy merged to the share and `docker compose up -d vllm-server`
