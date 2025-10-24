@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import typer
 
@@ -18,7 +19,6 @@ from ..core.logger import (
 )
 from ..core.run_manager import RunManager
 from ..core.resume import ResumeManager
-from ..core.io_utils import ensure_dir
 from ..core.ssl import disable_ssl_verification
 from ..data.preprocess import DataPreprocessor
 from ..training.sft_trainer import SFTTrainerRunner
@@ -57,6 +57,27 @@ def _default_output_dir(cfg: PipelineConfig) -> Path:
     dataset_stub = cfg.preprocess.dataset_name.split("/")[-1] if cfg.preprocess.dataset_name else "dataset"
     model_stub = cfg.train.base_model.split("/")[-1] if cfg.train.base_model else "model"
     return cfg.paths.outputs_dir / f"{dataset_stub}_{model_stub}"
+
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(value: str, fallback: str, max_length: int = 24) -> str:
+    slug = _SLUG_RE.sub("-", value.lower()).strip("-")
+    if not slug:
+        slug = fallback
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip("-")
+    return slug or fallback
+
+
+def _rel_to_project(path: Path, project_root: Path, *, label: str) -> Path:
+    try:
+        return path.relative_to(project_root)
+    except ValueError as exc:  # pragma: no cover - defensive branch
+        raise typer.BadParameter(
+            f"{label} must live within the project root ({project_root})."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +155,7 @@ def preprocess_sft(
 @app.command("finetune-sft")
 def finetune_sft(
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
-    data_dir: Path = typer.Option(..., help="Directory containing train/val jsonl."),
+    data_dir: Optional[Path] = typer.Option(None, help="Directory containing train/val jsonl."),
     output_dir: Optional[Path] = typer.Option(None, help="Directory to store adapter checkpoints."),
     base_model: Optional[str] = typer.Option(None, help="Base model to load."),
     cutoff_len: Optional[int] = typer.Option(None, help="Max sequence length."),
@@ -209,6 +230,7 @@ def finetune_sft(
     )
 
     output_resolved = Path(output_dir or _default_output_dir(cfg))
+    data_resolved = Path(data_dir or _default_preprocess_dir(cfg))
     resume_mgr = ResumeManager(logger)
     resume_path = resume_mgr.resolve(str(resume_from) if resume_from else None, output_resolved)
 
@@ -220,10 +242,10 @@ def finetune_sft(
                 logger.info(
                     "Starting finetune stage | base_model=%s | data_dir=%s | output=%s",
                     cfg.train.base_model,
-                    data_dir,
+                    data_resolved,
                     output_resolved,
                 )
-                summary = trainer.run(data_dir=Path(data_dir), output_dir=output_resolved, resume_path=resume_path)
+                summary = trainer.run(data_dir=data_resolved, output_dir=output_resolved, resume_path=resume_path)
                 logger.info("Training summary: %s", summary)
             except Exception as exc:
                 log_exception_with_locals(logger, "Finetune stage failed", exc)
@@ -235,7 +257,7 @@ def finetune_sft(
 @app.command("export-merged")
 def export_merged(
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
-    adapter_dir: Path = typer.Option(..., help="Directory with LoRA adapter."),
+    adapter_dir: Optional[Path] = typer.Option(None, help="Directory with LoRA adapter."),
     output_dir: Optional[Path] = typer.Option(None, help="Where to place merged model."),
     base_model: Optional[str] = typer.Option(None, help="Base model name."),
 ) -> None:
@@ -254,7 +276,8 @@ def export_merged(
         file_level=_level_to_int(cfg.logging.file_level),
     )
 
-    output_resolved = Path(output_dir or (cfg.paths.outputs_dir / "merged"))
+    adapter_resolved = Path(adapter_dir or (_default_output_dir(cfg) / "adapter"))
+    output_resolved = Path(output_dir or (_default_output_dir(cfg) / "merged"))
     merger = LoraMerger(cfg.train.base_model, logger)
     console_log = run_dir / "console.log"
     try:
@@ -263,10 +286,10 @@ def export_merged(
                 logger.info(
                     "Starting export stage | base_model=%s | adapter_dir=%s | output=%s",
                     cfg.train.base_model,
-                    adapter_dir,
+                    adapter_resolved,
                     output_resolved,
                 )
-                summary = merger.run(adapter_dir=adapter_dir, output_dir=output_resolved)
+                summary = merger.run(adapter_dir=adapter_resolved, output_dir=output_resolved)
                 logger.info("Merge summary: %s", summary)
             except Exception as exc:
                 log_exception_with_locals(logger, "Export stage failed", exc)
@@ -278,7 +301,7 @@ def export_merged(
 @app.command("eval-sft")
 def eval_sft(
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
-    model_dir: Path = typer.Option(..., help="Merged model directory."),
+    model_dir: Optional[Path] = typer.Option(None, help="Merged model directory."),
     output_dir: Optional[Path] = typer.Option(None, help="Where to store evaluation outputs."),
     cutoff_len: Optional[int] = typer.Option(None, help="Override sequence length for context."),
     val_path: Optional[Path] = typer.Option(None, help="Optional validation jsonl for perplexity."),
@@ -298,7 +321,8 @@ def eval_sft(
         file_level=_level_to_int(cfg.logging.file_level),
     )
 
-    output_resolved = Path(output_dir or (cfg.paths.outputs_dir / "eval"))
+    model_resolved = Path(model_dir or (_default_output_dir(cfg) / "merged"))
+    output_resolved = Path(output_dir or (_default_output_dir(cfg) / "eval"))
     evaluator = Evaluator(cfg.eval, logger)
     console_log = run_dir / "console.log"
     try:
@@ -306,16 +330,108 @@ def eval_sft(
             try:
                 logger.info(
                     "Starting eval stage | model_dir=%s | output=%s",
-                    model_dir,
+                    model_resolved,
                     output_resolved,
                 )
-                summary = evaluator.run(model_dir=Path(model_dir), output_dir=output_resolved, val_path=val_path)
+                summary = evaluator.run(model_dir=model_resolved, output_dir=output_resolved, val_path=val_path)
                 logger.info("Evaluation summary: %s", summary)
             except Exception as exc:
                 log_exception_with_locals(logger, "Eval stage failed", exc)
                 raise
     finally:
         finalize_logger(logger)
+
+
+def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
+    if not cfg.preprocess.dataset_name:
+        raise typer.BadParameter("preprocess.dataset_name must be set in config.yaml.")
+    sample_size = cfg.preprocess.sample_size
+    if sample_size is None or int(sample_size) <= 0:
+        raise typer.BadParameter("preprocess.sample_size must be a positive integer in config.yaml.")
+    if not cfg.train.base_model:
+        raise typer.BadParameter("train.base_model must be set in config.yaml.")
+    if not cfg.serve.served_model_name:
+        raise typer.BadParameter("serve.served_model_name must be set in config.yaml.")
+    if not cfg.serve.served_model_relpath:
+        raise typer.BadParameter("serve.served_model_relpath must be set in config.yaml.")
+
+    project_root = cfg.project_root
+    dataset_stub = cfg.preprocess.dataset_name.split("/")[-1]
+    model_stub = (cfg.train.base_model.split("/")[-1] or cfg.train.base_model)
+
+    dataset_slug = _slugify(dataset_stub, fallback="dataset", max_length=20)
+    model_slug = _slugify(model_stub, fallback="model", max_length=24)
+    sample_slug = _slugify(f"n{sample_size}", fallback="nfull", max_length=18)
+
+    compose_project = f"ft-{dataset_slug}-{sample_slug}-{model_slug}"
+    compose_project = compose_project.lower()
+    if len(compose_project) > 62:
+        compose_project = compose_project[:62].rstrip("-")
+    if not compose_project:
+        compose_project = "ft"
+    if not compose_project[0].isalpha():
+        compose_project = f"ft-{compose_project}"
+        compose_project = compose_project[:62].rstrip("-") or "ft"
+
+    preprocess_dir = _default_preprocess_dir(cfg)
+    output_dir = _default_output_dir(cfg)
+    adapter_dir = output_dir / "adapter"
+    merged_dir = output_dir / "merged"
+    eval_dir = output_dir / "eval"
+
+    preprocess_rel = _rel_to_project(preprocess_dir, project_root, label="Preprocess output directory")
+    output_rel = _rel_to_project(output_dir, project_root, label="Training output directory")
+    adapter_rel = _rel_to_project(adapter_dir, project_root, label="Adapter directory")
+    merged_rel = _rel_to_project(merged_dir, project_root, label="Merged directory")
+    eval_rel = _rel_to_project(eval_dir, project_root, label="Evaluation directory")
+
+    served_rel = cfg.serve.served_model_relpath.replace("\\", "/").strip("/")
+    if not served_rel:
+        raise typer.BadParameter("serve.served_model_relpath must not be empty.")
+
+    runtime: Dict[str, str] = {
+        "PROJECT_ROOT": str(project_root),
+        "COMPOSE_PROJECT": compose_project,
+        "DATASET_NAME": cfg.preprocess.dataset_name,
+        "DATASET_SAMPLE_SIZE": str(sample_size),
+        "BASE_MODEL_NAME": cfg.train.base_model,
+        "PREPROCESS_DIR": preprocess_rel.as_posix(),
+        "PREPROCESS_DIR_CONTAINER": f"/app/{preprocess_rel.as_posix()}",
+        "OUTPUT_DIR": output_rel.as_posix(),
+        "OUTPUT_DIR_CONTAINER": f"/app/{output_rel.as_posix()}",
+        "ADAPTER_DIR": adapter_rel.as_posix(),
+        "MERGED_DIR": merged_rel.as_posix(),
+        "MERGED_DIR_CONTAINER": f"/app/{merged_rel.as_posix()}",
+        "EVAL_DIR": eval_rel.as_posix(),
+        "EVAL_DIR_CONTAINER": f"/app/{eval_rel.as_posix()}",
+        "SERVED_MODEL_RELPATH": served_rel,
+        "SERVED_MODEL_PATH": f"/models/{served_rel}",
+        "SERVED_MODEL_NAME": cfg.serve.served_model_name,
+        "SERVED_MODEL_MAX_LEN": str(cfg.serve.max_model_len),
+        "SERVE_PORT": str(cfg.serve.port),
+        "SERVE_HOST": cfg.serve.host,
+    }
+    return runtime
+
+
+@app.command("print-runtime")
+def print_runtime(
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
+    format: str = typer.Option("env", "--format", "-f", help="Output format: env or json."),
+) -> None:
+    cfg = _load_config(config)
+    runtime = _build_runtime_metadata(cfg)
+
+    if format.lower() == "env":
+        for key, value in runtime.items():
+            typer.echo(f"{key}={value}")
+        return
+
+    if format.lower() == "json":
+        typer.echo(json.dumps(runtime, indent=2))
+        return
+
+    raise typer.BadParameter("Unsupported format. Use 'env' or 'json'.", param_hint="format")
 
 
 @app.command("smoke-test")

@@ -48,10 +48,11 @@ Runtime directories (ignored by git):
 6. Smoke-test the served model:
    - `python -m src.cli.main smoke-test --prompt "Résume AC215 en trois points."`
 
-Override any default with `KEY=VALUE` pairs. Example:
+Each stage now reads dataset/model/paths from `config.yaml`; edit the YAML once and rerun the desired commands.
+Inspect the resolved paths and docker-compose project name anytime with:
 
-```
-run_pipeline.bat finetune-sft EPOCHS=2 LR=1.5e-5 OUTPUT_DIR=outputs/my_experiment
+```powershell
+python -m src.cli.main print-runtime --format json
 ```
 
 ## Configuration
@@ -63,7 +64,7 @@ All tunables live in `config.yaml`:
 - `train`: LoRA hyper-parameters, scheduler, precision flags, logging cadence, resume options.
 - `export`: merged checkpoint behaviour.
 - `eval`: prompt suite plus generation parameters.
-- `serve`: vLLM host/port/max context/served model name.
+- `serve`: vLLM host/port/max context, served model name, and `served_model_relpath` (relative to `outputs/`).
 - `logging`: console/file log levels and tqdm refresh cadence.
 
 CLI options mirror these fields so you can override values without editing the YAML.
@@ -114,6 +115,9 @@ Remove or override these variables if you later restore a trusted certificate ch
 
 ## Docker pipeline
 
+These wrappers always consult `config.yaml` (or the file passed with `CONFIG=...`) and reuse the derived
+paths and names, so switching models/data only requires editing the YAML once.
+
 ```powershell
 run_pipeline.bat build             # Build CUDA/PyTorch image
 run_pipeline.bat up                # Start training container (reuse across stages)
@@ -142,8 +146,12 @@ plus a single tqdm progress bar on the console.
 
 ## vLLM serving
 
-- `vllm-server` reuses the shared `\\pc-27327\D\LLM` mount. Copy/symlink merged models into that share.
-- Change the compose command or `serve` section in `config.yaml` if you want a different directory/port.
+- Point `serve.served_model_relpath` in `config.yaml` to the merged folder under `outputs/`; the helper
+  expands it to `/models/...` inside the container.
+- `run_pipeline.bat serve-vllm` injects `SERVED_MODEL_PATH`, `SERVED_MODEL_NAME`, and
+  `SERVED_MODEL_MAX_LEN` before calling `docker compose` with the dynamic project name.
+- The `vllm-server` service still mounts `\\pc-27327\D\LLM`; copy or symlink your merged model there if
+  you want to serve from the shared drive instead of local outputs.
 - Smoke-test via the bundled helper or any OpenAI-compatible client:
 
 ```python

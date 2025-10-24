@@ -1,11 +1,10 @@
 services:
-  qwen25-05b:
+  sft:
     env_file:
       - .env
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: qwen25-05b
     working_dir: /app
     tty: true
     stdin_open: true
@@ -43,13 +42,15 @@ services:
 
   vllm-server:
     image: vllm/vllm-openai:latest
-    container_name: vllm-server
     runtime: nvidia
     gpus: all
     privileged: true
     ipc: host
     environment:
       VLLM_CACHE_ROOT: /models/cache
+      SERVED_MODEL_PATH: ${SERVED_MODEL_PATH:?Define SERVED_MODEL_PATH (e.g. /models/run/merged)}
+      SERVED_MODEL_NAME: ${SERVED_MODEL_NAME:-Qwen2.5-0.5B-SFT}
+      SERVED_MODEL_MAX_LEN: ${SERVED_MODEL_MAX_LEN:-2048}
       VLLM_TARGET_DEVICE: cuda # use GPU for serving
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       CURL_CA_BUNDLE: ""
@@ -66,10 +67,10 @@ services:
       - "8080:8000"
     command:
       - "--model"
-      - "${SERVED_MODEL_PATH:-/models/autoif_qwen25_05b_lora/merged}"
+      - "${SERVED_MODEL_PATH:?Missing SERVED_MODEL_PATH}"
       - "--served-model-name"
-      - "Qwen2.5-0.5B-SFT"
+      - "${SERVED_MODEL_NAME:-Qwen2.5-0.5B-SFT}"
       - "--max-model-len"
-      - "2048"
+      - "${SERVED_MODEL_MAX_LEN:-2048}"
     depends_on:
-      - qwen25-05b
+      - sft

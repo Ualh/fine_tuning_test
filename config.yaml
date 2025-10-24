@@ -9,7 +9,7 @@ paths:
 
 preprocess:
   dataset_name: tatsu-lab/alpaca
-  sample_size: 2000
+  sample_size: 9999999999999999
   filter_langs:
     - en
     # - fr
@@ -21,11 +21,11 @@ preprocess:
   pack_sequences: true
 
 train:
-  base_model: Qwen/Qwen2.5-0.5B
+  base_model: Qwen/Qwen2-7B
   cutoff_len: 2048
   batch_size: 4
   gradient_accumulation: 8
-  epochs: 1
+  epochs: 3
   learning_rate: 0.00002
   min_learning_rate: 0.000005
   weight_decay: 0.01
@@ -48,7 +48,7 @@ train:
   logging_steps: 20
   eval_steps: 100
   # Keep >=3 for smoke checks; set to null for full-session runs once validated.
-  max_steps: 3  # Default smoke pass; temporarily set to null when running full epochs
+  max_steps: null  # Default smoke pass; temporarily set to null when running full epochs
   resume_from: null
 
 export:
@@ -74,6 +74,7 @@ serve:
   port: 8080
   max_model_len: 2048
   served_model_name: Qwen2.5-0.5B-SFT
+  served_model_relpath: autoif_qwen25_05b_lora/merged
   resume_from: null
 
 logging:

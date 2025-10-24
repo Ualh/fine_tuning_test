@@ -91,6 +91,7 @@ class ServeConfig:
     port: int
     max_model_len: int
     served_model_name: str
+    served_model_relpath: Optional[str]
     resume_from: Optional[str]
 
 
@@ -110,6 +111,7 @@ class PipelineConfig:
     eval: EvalConfig
     serve: ServeConfig
     logging: LoggingConfig
+    project_root: Path
 
 
 class ConfigLoader:
@@ -135,6 +137,7 @@ class ConfigLoader:
             eval=self._parse_eval(),
             serve=self._parse_serve(),
             logging=self._parse_logging(),
+            project_root=self.project_root,
         )
 
     # ------------------------------------------------------------------
@@ -231,6 +234,7 @@ class ConfigLoader:
             port=int(data.get("port", 8080)),
             max_model_len=int(data.get("max_model_len", 2048)),
             served_model_name=data.get("served_model_name", "model"),
+            served_model_relpath=self._to_optional_str(data.get("served_model_relpath")),
             resume_from=self._to_optional_str(data.get("resume_from")),
         )
 
