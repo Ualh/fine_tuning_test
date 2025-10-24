@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import functools
+import json
 import os
 from pathlib import Path
 from typing import Dict, Optional
 import inspect
 
 import torch
-from datasets import load_dataset
+from datasets import Dataset, DatasetDict, Features, Value
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
 from huggingface_hub import login as hf_login
@@ -103,11 +104,7 @@ class SFTTrainerRunner:
             task_type="CAUSAL_LM",
         )
 
-        data_files = {
-            "train": str(data_dir / "train.jsonl"),
-            "validation": str(data_dir / "val.jsonl"),
-        }
-        datasets = load_dataset("json", data_files=data_files)
+        datasets = self._load_jsonl_splits(Path(data_dir))
 
         enable_bf16 = self.config.bf16 and has_cuda
         enable_fp16 = self.config.fp16 and has_cuda and not enable_bf16
@@ -161,6 +158,39 @@ class SFTTrainerRunner:
         )
         atomic_write_json({"train": asdict(summary)}, output_dir / "metadata.json")
         return summary
+
+    @staticmethod
+    def _load_jsonl_splits(data_dir: Path) -> DatasetDict:
+        """Load train/val splits from JSONL without relying on datasets' JSON loader."""
+
+        mapping = {"train": "train.jsonl", "validation": "val.jsonl"}
+        features = Features({"text": Value("string")})
+        splits: Dict[str, Dataset] = {}
+
+        for split_name, filename in mapping.items():
+            path = data_dir / filename
+            if not path.exists():
+                raise FileNotFoundError(f"Expected {filename} in {data_dir}")
+
+            texts = []
+            with path.open("r", encoding="utf-8") as handle:
+                for line_no, raw_line in enumerate(handle, 1):
+                    record_raw = raw_line.strip()
+                    if not record_raw:
+                        continue
+                    try:
+                        record = json.loads(record_raw)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(f"Invalid JSON in {path} at line {line_no}: {exc}") from exc
+
+                    text = record.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError(f"Missing text field in {path} at line {line_no}")
+                    texts.append(text)
+
+            splits[split_name] = Dataset.from_dict({"text": texts}, features=features)
+
+        return DatasetDict(splits)
 
     @staticmethod
     def _ensure_tokenizer_compat() -> None:

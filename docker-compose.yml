@@ -43,7 +43,7 @@ services:
 
   vllm-server:
     image: vllm/vllm-openai:latest
-    container_name: vllm-qwen25-05b
+    container_name: vllm-server
     runtime: nvidia
     gpus: all
     privileged: true
@@ -61,12 +61,12 @@ services:
       HF_HUB_ENABLE_XET: "0"
       GIT_SSL_NO_VERIFY: "1"
     volumes:
-      - "\\\\pc-27327\\D\\LLM:/models"
+      - "./outputs:/models"
     ports:
       - "8080:8000"
     command:
       - "--model"
-      - "/models/autoif_qwen25_05b_lora/merged"
+      - "${SERVED_MODEL_PATH:-/models/autoif_qwen25_05b_lora/merged}"
       - "--served-model-name"
       - "Qwen2.5-0.5B-SFT"
       - "--max-model-len"
