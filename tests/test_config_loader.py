@@ -13,5 +13,6 @@ def test_config_loader_reads_defaults():
     assert cfg.preprocess.sample_size is None  # 'full' maps to None internally
     assert cfg.paths.logs_dir.name == "logs"
     assert cfg.logging.console_level == "INFO"
+    assert cfg.logging.debug_pipeline is False
     assert cfg.serve.served_model_relpath == "autoif_qwen25_05b_lora/merged"
     assert cfg.project_root == config_path.parent

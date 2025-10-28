@@ -81,3 +81,4 @@ logging:
   console_level: INFO
   file_level: DEBUG
   tqdm_refresh_rate: 1.0
+  debug_pipeline: false  # Set true to surface verbose pipeline traces.

@@ -413,6 +413,7 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         "SERVED_MODEL_MAX_LEN": str(cfg.serve.max_model_len),
         "SERVE_PORT": str(cfg.serve.port),
         "SERVE_HOST": cfg.serve.host,
+        "DEBUG_PIPELINE": "1" if cfg.logging.debug_pipeline else "0",
     }
     return runtime
 

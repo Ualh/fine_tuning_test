@@ -100,6 +100,7 @@ class LoggingConfig:
     console_level: str
     file_level: str
     tqdm_refresh_rate: float
+    debug_pipeline: bool = False
 
 
 @dataclass
@@ -250,6 +251,7 @@ class ConfigLoader:
             console_level=str(data.get("console_level", "INFO")),
             file_level=str(data.get("file_level", "DEBUG")),
             tqdm_refresh_rate=float(data.get("tqdm_refresh_rate", 1.0)),
+            debug_pipeline=bool(self._to_bool(data.get("debug_pipeline", False))),
         )
 
     # ------------------------------------------------------------------

@@ -212,6 +212,13 @@ This keeps lineage for prepared splits and model artefacts without requiring a r
   `ModuleNotFoundError: typer` on your host, run stages via `run_pipeline.bat` (do not call Python locally),
   or run `run_pipeline.bat bash` and execute `python3 -m src.cli.main ...` inside the container.
 
+- **`. était inattendu.` during `run_pipeline.bat up`**: some CUDA base images print a Unicode banner
+  (NVIDIA ASCII art + emoji) before the Typer command emits `KEY=VALUE` pairs. The wrapper now routes
+  the probe through `python3 -m src.core.runtime_probe` inside the container so banner noise is dropped
+  automatically. If the shell still complains, rerun with `CONFIG=debug_config.yaml` (which enables
+  `logging.debug_pipeline: true`) to surface extra context and share the console trace when reporting
+  the issue.
+
 ## Dataset reference
 
 - **Dataset**: `Post-training-Data-Flywheel/AutoIF-instruct-61k-with-funcs`

@@ -13,7 +13,7 @@ preprocess:
   filter_langs:
     - en
   test_size: 0.2
-  cutoff_len: 512
+  cutoff_len: 1024
   seed: 215
   save_splits: true
   max_workers: 2
@@ -25,25 +25,28 @@ train:
   batch_size: 1
   gradient_accumulation: 1
   epochs: 1
-  learning_rate: 0.0002
-  min_learning_rate: 0.00002
-  weight_decay: 0.0
-  warmup_ratio: 0.0
+  learning_rate: 0.00002
+  min_learning_rate: 0.000005
+  weight_decay: 0.01
+  warmup_ratio: 0.03
   lr_scheduler: cosine
   lora_r: 4
   lora_alpha: 16
   lora_dropout: 0.05
   lora_target_modules:
     - q_proj
-    - v_proj
     - k_proj
+    - v_proj
     - o_proj
-  gradient_checkpointing: false
+    - gate_proj
+    - up_proj
+    - down_proj
+  gradient_checkpointing: true
   bf16: false
   fp16: false
   logging_steps: 1
-  eval_steps: 2
-  max_steps: 4
+  eval_steps: 5
+  max_steps: 10
   resume_from: null
 
 export:
@@ -65,12 +68,12 @@ serve:
   host: 0.0.0.0
   port: 8080
   max_model_len: 512
-  served_model_name: Qwen2.5-0.5B-SFT-SMOKE
+  served_model_name: Qwen2.5-0.5B-SFT-DEBUG
   served_model_relpath: alpaca_n32_Qwen2.5-0.5B/merged
   resume_from: null
 
 logging:
-  console_level: INFO
+  console_level: DEBUG
   file_level: DEBUG
-  tqdm_refresh_rate: 1.0
-  debug_pipeline: false
+  tqdm_refresh_rate: 0.5
+  debug_pipeline: true

@@ -11,17 +11,20 @@ REM ============================ Default values ================================
 REM ============================================================================
 set "CURL_CA_BUNDLE="
 set "REQUESTS_CA_BUNDLE="
+REM ===========================remove SSL===============================
 set "SSL_CERT_FILE="
 set "PYTHONHTTPSVERIFY=0"
 set "HF_HUB_DISABLE_SSL_VERIFY=1"
 set "HF_HUB_ENABLE_XET=0"
 set "GIT_SSL_NO_VERIFY=1"
-
+REM ==========================configure pipeline===========================
 set "CONFIG=config.yaml"
 set "SERVICE=sft"
 set "VLLM_SERVICE=vllm-server"
+REM ========================runtime metadata vars==========================
 set "RUNTIME_LOADED="
 set "RUNTIME_FILE="
+set "RUNTIME_RAW="
 set "COMPOSE_PROJECT="
 set "SERVED_MODEL_PATH="
 set "SERVED_MODEL_NAME="
@@ -208,61 +211,41 @@ if errorlevel 1 exit /b %ERRORLEVEL%
 set "RUNTIME_LOADED=1"
 echo [RUNTIME] COMPOSE_PROJECT=%COMPOSE_PROJECT%
 if defined DATASET_NAME echo [RUNTIME] dataset=%DATASET_NAME% sample=%DATASET_SAMPLE_SIZE% base=%BASE_MODEL_NAME%
+if "%DEBUG_PIPELINE%"=="1" echo [RUNTIME] debug pipeline mode enabled
 goto :eof
 
 :load_runtime
+if "%DEBUG_PIPELINE%"=="1" echo [TRACE] entering load_runtime
 if defined RUNTIME_FILE (
     if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
 )
-set "RUNTIME_FILE=%TEMP%\pipeline_runtime_%RANDOM%_%RANDOM%.tmp"
-set "RUNTIME_RAW=%RUNTIME_FILE%.raw"
-REM Compute runtime metadata inside Docker first to avoid local Python dependency
+set "RUNTIME_FILE=%TEMP%\pipeline_runtime_%RANDOM%_%RANDOM%.env"
+set "RUNTIME_RAW=%TEMP%\pipeline_runtime_%RANDOM%_%RANDOM%.raw"
 set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
-set "PRINT_RUNTIME_CMD=python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env"
-if defined DEBUG_PIPELINE (
-    echo [TRACE] debug mode: filtering runtime output inside container
-    set "PRINT_RUNTIME_CMD=python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env | grep -E '^[A-Z][A-Z0-9_]*='"
-)
-docker compose run --rm --no-deps -T sft bash -lc "%PRINT_RUNTIME_CMD%" >"%RUNTIME_RAW%"
+if "%DEBUG_PIPELINE%"=="1" echo [TRACE] invoking docker runtime probe for config=%CONFIG_POSIX%
+docker compose run --rm --no-deps -T %SERVICE% bash -lc "python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env" >"%RUNTIME_RAW%"
 set "STATUS=%ERRORLEVEL%"
-if defined DEBUG_PIPELINE echo [DEBUG] docker probe status=%STATUS%
-if defined DEBUG_PIPELINE echo [TRACE] after docker probe
-if "%STATUS%"=="0" goto :after_runtime_probe
+if "%DEBUG_PIPELINE%"=="1" echo [TRACE] docker probe exit status=%STATUS%
+if %STATUS% EQU 0 goto :runtime_filter
 
-echo [RUNTIME] Docker runtime probe failed (%STATUS%). Falling back to local Python...
+echo [WARN] Docker runtime probe failed (%STATUS%). Falling back to local Python...
 python -m src.cli.main print-runtime --config "%CONFIG%" --format env >"%RUNTIME_RAW%"
 set "STATUS=%ERRORLEVEL%"
-if defined DEBUG_PIPELINE echo [DEBUG] local probe status=%STATUS%
-if not "%STATUS%"=="0" (
-    if exist "%RUNTIME_RAW%" del "%RUNTIME_RAW%" >nul 2>&1
-    if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
-    exit /b %STATUS%
+if "%DEBUG_PIPELINE%"=="1" echo [TRACE] local probe exit status=%STATUS%
+if %STATUS% NEQ 0 goto :runtime_error
+
+:runtime_filter
+if "%DEBUG_PIPELINE%"=="1" echo [TRACE] filtering runtime probe output via python
+python -m src.core.runtime_probe "%RUNTIME_RAW%" >"%RUNTIME_FILE%"
+set "STATUS=%ERRORLEVEL%"
+if %STATUS% NEQ 0 goto :runtime_error
+
+if "%DEBUG_PIPELINE%"=="1" echo [TRACE] applying environment variables from filtered probe
+for /f "usebackq tokens=1,* delims==" %%A in ("%RUNTIME_FILE%") do (
+    set "%%A=%%B"
 )
 
-:after_runtime_probe
-REM DEBUG: temporarily disable runtime raw dump to isolate issue
-REM if defined DEBUG_PIPELINE call :debug_dump "runtime raw" "%RUNTIME_RAW%"
-set "FILTER_EXIT="
-if defined DEBUG_PIPELINE echo [TRACE] before findstr
-findstr /R "^[A-Z][A-Z0-9_]*=" "%RUNTIME_RAW%" >"%RUNTIME_FILE%" 2>nul
-set "FILTER_EXIT=%ERRORLEVEL%"
-if defined DEBUG_PIPELINE echo [DEBUG] findstr errorlevel=%FILTER_EXIT%
-if defined DEBUG_PIPELINE echo [TRACE] before filtered dump
-if not "%FILTER_EXIT%"=="0" (
-    if defined DEBUG_PIPELINE call :debug_dump "runtime raw (filter failed)" "%RUNTIME_RAW%"
-)
-if defined DEBUG_PIPELINE call :debug_dump "runtime filtered" "%RUNTIME_FILE%"
-if defined DEBUG_PIPELINE echo [TRACE] before for-loop
-for /f "usebackq tokens=* delims=" %%L in ("%RUNTIME_FILE%") do (
-    if not "%%L"=="" (
-        if defined DEBUG_PIPELINE echo [DEBUG] raw line: %%L
-        echo(%%L| findstr /R "^[A-Z][A-Z0-9_]*=" >nul
-        if not errorlevel 1 for /f "tokens=1,* delims==" %%A in ("%%L") do (
-            set "%%A=%%B"
-        )
-    )
-)
 if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
 if exist "%RUNTIME_RAW%" del "%RUNTIME_RAW%" >nul 2>&1
 if not defined COMPOSE_PROJECT (
@@ -271,21 +254,10 @@ if not defined COMPOSE_PROJECT (
 )
 exit /b 0
 
-:debug_dump
-setlocal EnableExtensions EnableDelayedExpansion
-set "_DESC=%~1"
-set "_FILE=%~2"
-echo [DEBUG] %_DESC% path=%_FILE%
-if exist "%_FILE%" (
-    for %%F in ("%_FILE%") do echo [DEBUG] %_DESC% size=%%~zF
-    echo [DEBUG] %_DESC% content begin
-    type "%_FILE%"
-    echo [DEBUG] %_DESC% content end
-) else (
-    echo [DEBUG] %_DESC% missing
-)
-endlocal
-goto :eof
+:runtime_error
+if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
+if exist "%RUNTIME_RAW%" del "%RUNTIME_RAW%" >nul 2>&1
+exit /b %STATUS%
 
 :compose
 if defined COMPOSE_PROJECT (
