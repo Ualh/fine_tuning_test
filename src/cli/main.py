@@ -355,8 +355,6 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         raise typer.BadParameter("train.base_model must be set in config.yaml.")
     if not cfg.serve.served_model_name:
         raise typer.BadParameter("serve.served_model_name must be set in config.yaml.")
-    if not cfg.serve.served_model_relpath:
-        raise typer.BadParameter("serve.served_model_relpath must be set in config.yaml.")
 
     project_root = cfg.project_root
     dataset_stub = cfg.preprocess.dataset_name.split("/")[-1]
@@ -388,9 +386,15 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
     merged_rel = _rel_to_project(merged_dir, project_root, label="Merged directory")
     eval_rel = _rel_to_project(eval_dir, project_root, label="Evaluation directory")
 
-    served_rel = cfg.serve.served_model_relpath.replace("\\", "/").strip("/")
-    if not served_rel:
-        raise typer.BadParameter("serve.served_model_relpath must not be empty.")
+    # Determine the served model relative path. If the config value is falsy
+    # or explicitly set to the string "none" (case-insensitive), use the
+    # merged model directory instead. Otherwise normalize backslashes to
+    # forward slashes and strip any leading/trailing slashes.
+    raw_served = cfg.serve.served_model_relpath
+    if not raw_served or (isinstance(raw_served, str) and raw_served.strip().lower() == "none"):
+        served_rel = merged_rel.as_posix()
+    else:
+        served_rel = str(raw_served).replace("\\", "/").strip("/")
 
     runtime: Dict[str, str] = {
         "PROJECT_ROOT": str(project_root),

@@ -4,7 +4,7 @@ paths:
   outputs_dir: outputs
   logs_dir: logs
   huggingface_cache: "${USERPROFILE}\\.cache\\huggingface"
-  models_mount: "\\\\pc-27327\\D\\LLM"
+  models_mount: "..\\outputs"
   run_metadata_file: logs/latest.txt
 
 preprocess:
@@ -73,7 +73,7 @@ serve:
   host: 0.0.0.0
   port: 8080
   max_model_len: 2048
-  served_model_name: Qwen2.5-0.5B-SFT
+  served_model_name: Qwen2-7B-SFT
   served_model_relpath: autoif_qwen25_05b_lora/merged
   resume_from: null
 
