@@ -10,7 +10,7 @@ def test_config_loader_reads_defaults():
     cfg = loader.load()
 
     assert cfg.train.base_model == "Qwen/Qwen2-7B"
-    assert cfg.preprocess.sample_size == 9999999999999999
+    assert cfg.preprocess.sample_size is None  # 'full' maps to None internally
     assert cfg.paths.logs_dir.name == "logs"
     assert cfg.logging.console_level == "INFO"
     assert cfg.serve.served_model_relpath == "autoif_qwen25_05b_lora/merged"

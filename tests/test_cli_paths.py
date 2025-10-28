@@ -13,8 +13,12 @@ def test_default_paths(tmp_path):
     output_dir = _default_output_dir(cfg)
 
     assert preprocess_dir.parent == cfg.paths.prepared_dir
-    assert preprocess_dir.name.endswith(str(cfg.preprocess.sample_size))
+    expected_suffix = "full" if cfg.preprocess.sample_size is None else str(cfg.preprocess.sample_size)
+    assert preprocess_dir.name.endswith(expected_suffix)
     assert output_dir.parent == cfg.paths.outputs_dir
+    # Output directory name should include the sample size tag as well ("full" or n<samples>)
+    expected_output_tag = "full" if cfg.preprocess.sample_size is None else f"n{cfg.preprocess.sample_size}"
+    assert expected_output_tag in output_dir.name
 
 
 def test_print_runtime_env_format():

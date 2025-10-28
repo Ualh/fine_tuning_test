@@ -27,7 +27,7 @@ class PathsConfig:
 @dataclass
 class PreprocessConfig:
     dataset_name: str
-    sample_size: int
+    sample_size: Optional[int]
     filter_langs: List[str]
     test_size: float
     cutoff_len: int
@@ -118,7 +118,7 @@ class ConfigLoader:
     """Load configuration from YAML and provide dataclass accessors."""
 
     def __init__(self, config_path: str | Path) -> None:
-        self.config_path = Path(config_path)
+        self.config_path = Path(config_path).expanduser().resolve()
         if not self.config_path.exists():
             raise PipelineConfigError(f"Config file not found: {self.config_path}")
         with self.config_path.open("r", encoding="utf-8") as handle:
@@ -162,9 +162,15 @@ class ConfigLoader:
     def _parse_preprocess(self) -> PreprocessConfig:
         data = self.raw.get("preprocess", {})
         filter_langs = data.get("filter_langs", ["en"]) or []
+        raw_sample = data.get("sample_size", 1000)
+        sample_size: Optional[int]
+        if raw_sample is None or str(raw_sample).strip().lower() in {"", "null", "none", "full"}:
+            sample_size = None
+        else:
+            sample_size = int(raw_sample)
         return PreprocessConfig(
             dataset_name=data.get("dataset_name", ""),
-            sample_size=int(data.get("sample_size", 1000)),
+            sample_size=sample_size,
             filter_langs=list(parse_comma_separated(filter_langs)),
             test_size=float(data.get("test_size", 0.1)),
             cutoff_len=int(data.get("cutoff_len", 2048)),

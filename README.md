@@ -49,10 +49,12 @@ Runtime directories (ignored by git):
    - `python -m src.cli.main smoke-test --prompt "Résume AC215 en trois points."`
 
 Each stage now reads dataset/model/paths from `config.yaml`; edit the YAML once and rerun the desired commands.
-Inspect the resolved paths and docker-compose project name anytime with:
+Inspect the resolved paths and docker-compose project name anytime (Docker-first):
 
 ```powershell
-python -m src.cli.main print-runtime --format json
+run_pipeline.bat bash
+# Inside container (optional):
+python3 -m src.cli.main print-runtime --format json
 ```
 
 ## Configuration
@@ -121,15 +123,24 @@ paths and names, so switching models/data only requires editing the YAML once.
 ```powershell
 run_pipeline.bat build             # Build CUDA/PyTorch image
 run_pipeline.bat up                # Start training container (reuse across stages)
-run_pipeline.bat preprocess-sft    # Prepare 2k EN/FR examples
+run_pipeline.bat preprocess-sft    # Prepare N examples (see preprocess.sample_size)
 run_pipeline.bat finetune-sft      # Run LoRA training (resumable)
 run_pipeline.bat export-merged     # Merge adapters into base model
 run_pipeline.bat eval-sft          # Lightweight evaluation checkpoints
 run_pipeline.bat serve-vllm        # Launch vLLM on port 8080
+run_pipeline.bat clean             # Stop project, remove orphans, prune unused resources
 ```
 
 Each stage writes DEBUG logs to `logs/log_vXX_.../stage/run.log` while emitting succinct INFO messages
 plus a single tqdm progress bar on the console.
+
+### Extras: monitoring and UI
+
+- Dozzle (container logs UI): http://localhost:9999
+- Open WebUI (chat UI over OpenAI API): http://localhost:3000
+
+When you run `run_pipeline.bat serve-vllm`, both services are started alongside `vllm-server`.
+Open WebUI is preconfigured to talk to the vLLM OpenAI endpoint inside the compose network.
 
 ## Resumability & logging
 
@@ -139,6 +150,7 @@ plus a single tqdm progress bar on the console.
   `console.log` (stdout/stderr with ANSI sequences stripped), and `container.log` (tail of
   `docker logs --tail 2000` for the training container captured by `run_pipeline.bat`).
 - Metadata JSON files (`metadata.json`, `metrics.json`) summarise seeds, sizes, metrics, and timings.
+- Output directories include the dataset sample size: `outputs/<dataset>_<nX|full>_<model>/...`.
 - Console output stays tidy; dive into `run.log` for full stack traces and inspect `console.log`
   when you need the plain-text CLI output that appeared on screen.
 - Regression coverage: `pytest tests/test_failure_logging.py` ensures failures persist rich traceback
@@ -161,6 +173,13 @@ client = VLLMClient(endpoint="http://localhost:8080", model="Qwen2.5-0.5B-SFT")
 if client.healthcheck():
     print(client.generate("Give me two bullet tips for managing VRAM."))
 ```
+
+Open WebUI tips:
+
+- Visit http://localhost:3000 and create the first admin user on first launch.
+- It auto-detects the OpenAI provider using the internal URL; alternatively set the OpenAI Base URL to
+  `http://localhost:8080/v1` in Settings and use any placeholder API key if prompted.
+  Then select the served model name (e.g., `Qwen2.5-0.5B-SFT`) when chatting.
 
 ## DVC (local only)
 
@@ -186,6 +205,12 @@ This keeps lineage for prepared splits and model artefacts without requiring a r
   systems.
 - **WANDB requests**: the container defaults to `WANDB_MODE=offline`; remove/override if you want online
   tracking later.
+- **Dozzle shows no containers**: ensure Docker Desktop is running Linux containers; the socket mount
+  `/var/run/docker.sock` must be available to the Dozzle container. If constrained by corporate policy,
+  skip Dozzle and use `docker compose logs -f` instead.
+- **Local Typer import errors**: the wrapper computes runtime info inside Docker first. If you still see
+  `ModuleNotFoundError: typer` on your host, run stages via `run_pipeline.bat` (do not call Python locally),
+  or run `run_pipeline.bat bash` and execute `python3 -m src.cli.main ...` inside the container.
 
 ## Dataset reference
 

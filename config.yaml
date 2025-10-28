@@ -9,7 +9,7 @@ paths:
 
 preprocess:
   dataset_name: tatsu-lab/alpaca
-  sample_size: 9999999999999999
+  sample_size: full
   filter_langs:
     - en
     # - fr

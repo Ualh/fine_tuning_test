@@ -50,13 +50,15 @@ def _level_to_int(level: str) -> int:
 
 def _default_preprocess_dir(cfg: PipelineConfig) -> Path:
     dataset_stub = cfg.preprocess.dataset_name.split("/")[-1] if cfg.preprocess.dataset_name else "dataset"
-    return cfg.paths.prepared_dir / f"{dataset_stub}_{cfg.preprocess.sample_size}".replace("-", "_")
+    size_tag = "full" if (cfg.preprocess.sample_size in (None, 0)) else str(cfg.preprocess.sample_size)
+    return cfg.paths.prepared_dir / f"{dataset_stub}_{size_tag}".replace("-", "_")
 
 
 def _default_output_dir(cfg: PipelineConfig) -> Path:
     dataset_stub = cfg.preprocess.dataset_name.split("/")[-1] if cfg.preprocess.dataset_name else "dataset"
+    sample_tag = "full" if (cfg.preprocess.sample_size in (None, 0)) else f"n{cfg.preprocess.sample_size}"
     model_stub = cfg.train.base_model.split("/")[-1] if cfg.train.base_model else "model"
-    return cfg.paths.outputs_dir / f"{dataset_stub}_{model_stub}"
+    return cfg.paths.outputs_dir / f"{dataset_stub}_{sample_tag}_{model_stub}"
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -346,8 +348,9 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
     if not cfg.preprocess.dataset_name:
         raise typer.BadParameter("preprocess.dataset_name must be set in config.yaml.")
     sample_size = cfg.preprocess.sample_size
-    if sample_size is None or int(sample_size) <= 0:
-        raise typer.BadParameter("preprocess.sample_size must be a positive integer in config.yaml.")
+    # None means 'full' dataset
+    if sample_size is not None and int(sample_size) <= 0:
+        raise typer.BadParameter("preprocess.sample_size must be a positive integer or 'full' in config.yaml.")
     if not cfg.train.base_model:
         raise typer.BadParameter("train.base_model must be set in config.yaml.")
     if not cfg.serve.served_model_name:
@@ -361,7 +364,7 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
 
     dataset_slug = _slugify(dataset_stub, fallback="dataset", max_length=20)
     model_slug = _slugify(model_stub, fallback="model", max_length=24)
-    sample_slug = _slugify(f"n{sample_size}", fallback="nfull", max_length=18)
+    sample_slug = "full" if sample_size is None else _slugify(f"n{sample_size}", fallback="nfull", max_length=18)
 
     compose_project = f"ft-{dataset_slug}-{sample_slug}-{model_slug}"
     compose_project = compose_project.lower()
@@ -393,7 +396,7 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         "PROJECT_ROOT": str(project_root),
         "COMPOSE_PROJECT": compose_project,
         "DATASET_NAME": cfg.preprocess.dataset_name,
-        "DATASET_SAMPLE_SIZE": str(sample_size),
+    "DATASET_SAMPLE_SIZE": "full" if sample_size is None else str(sample_size),
         "BASE_MODEL_NAME": cfg.train.base_model,
         "PREPROCESS_DIR": preprocess_rel.as_posix(),
         "PREPROCESS_DIR_CONTAINER": f"/app/{preprocess_rel.as_posix()}",

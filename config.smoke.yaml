@@ -1,0 +1,75 @@
+paths:
+  data_root: data
+  prepared_dir: prepared
+  outputs_dir: outputs
+  logs_dir: logs
+  huggingface_cache: "${USERPROFILE}\\.cache\\huggingface"
+  models_mount: "..\\outputs"
+  run_metadata_file: logs/latest.txt
+
+preprocess:
+  dataset_name: tatsu-lab/alpaca
+  sample_size: 32
+  filter_langs:
+    - en
+  test_size: 0.2
+  cutoff_len: 512
+  seed: 215
+  save_splits: true
+  max_workers: 2
+  pack_sequences: false
+
+train:
+  base_model: Qwen/Qwen2.5-0.5B
+  cutoff_len: 512
+  batch_size: 1
+  gradient_accumulation: 1
+  epochs: 1
+  learning_rate: 0.0002
+  min_learning_rate: 0.00002
+  weight_decay: 0.0
+  warmup_ratio: 0.0
+  lr_scheduler: cosine
+  lora_r: 4
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+  gradient_checkpointing: false
+  bf16: false
+  fp16: false
+  logging_steps: 1
+  eval_steps: 2
+  max_steps: 4
+  resume_from: null
+
+export:
+  include_adapter_weights: true
+  resume_from: null
+
+eval:
+  cutoff_len: 512
+  max_new_tokens: 64
+  temperature: 0.7
+  top_p: 0.9
+  prompts:
+    - instruction: "Summarize the Alpaca dataset in one sentence."
+      language: en
+      max_sentences: 1
+  resume_from: null
+
+serve:
+  host: 0.0.0.0
+  port: 8080
+  max_model_len: 512
+  served_model_name: Qwen2.5-0.5B-SFT-SMOKE
+  served_model_relpath: alpaca_n32_Qwen2.5-0.5B/merged
+  resume_from: null
+
+logging:
+  console_level: INFO
+  file_level: DEBUG
+  tqdm_refresh_rate: 1.0

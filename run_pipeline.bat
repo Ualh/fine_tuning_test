@@ -70,15 +70,16 @@ if /I "%TARGET%"=="export-merged"  goto :export
 if /I "%TARGET%"=="eval-sft"       goto :evaluate
 if /I "%TARGET%"=="serve-vllm"     goto :serve
 if /I "%TARGET%"=="show-last"      goto :showlast
+if /I "%TARGET%"=="clean"           goto :clean
+if /I "%TARGET%"=="prune"           goto :clean
 goto :help
 
 REM ============================================================================
 REM ============================= Commands =====================================
 REM ============================================================================
 :build
-call :ensure_runtime
-if errorlevel 1 goto :eof
-call :compose build
+REM Build should not require runtime metadata; call docker compose directly
+docker compose build
 goto :eof
 
 :up
@@ -90,7 +91,7 @@ goto :eof
 :down
 call :ensure_runtime
 if errorlevel 1 goto :eof
-call :compose down
+call :compose down --remove-orphans
 goto :eof
 
 :bash
@@ -107,6 +108,7 @@ set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main preprocess-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
+call :compose up -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs preprocess
@@ -121,6 +123,7 @@ set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main finetune-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
+call :compose up -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs finetune
@@ -134,6 +137,7 @@ set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main export-merged --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
+call :compose up -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs export
@@ -148,6 +152,7 @@ set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main eval-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
+call :compose up -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs eval
@@ -169,9 +174,12 @@ if not defined SERVED_MODEL_PATH (
 set "SERVED_MODEL_PATH=%SERVED_MODEL_PATH%"
 set "SERVED_MODEL_NAME=%SERVED_MODEL_NAME%"
 set "SERVED_MODEL_MAX_LEN=%SERVED_MODEL_MAX_LEN%"
-call :compose up -d %VLLM_SERVICE%
+REM Bring up vLLM along with monitoring and UI
+call :compose up -d %VLLM_SERVICE% dozzle open-webui
 if errorlevel 1 goto :eof
 echo [INFO] vLLM server exposed on http://%SERVE_DISPLAY%:%SERVE_PORT%
+echo [INFO] Dozzle logs UI:      http://localhost:9999
+echo [INFO] Open WebUI:          http://localhost:3000
 goto :eof
 
 :showlast
@@ -180,6 +188,17 @@ if not exist logs\latest.txt (
     goto :eof
 )
 type logs\latest.txt
+goto :eof
+
+:clean
+echo [CLEAN] Stopping project and removing orphans...
+docker compose down --remove-orphans
+echo [CLEAN] Pruning stopped containers, dangling images, volumes and networks...
+docker container prune -f >nul 2>&1
+docker image prune -f >nul 2>&1
+docker volume prune -f >nul 2>&1
+docker system prune -f >nul 2>&1
+echo [CLEAN] Docker cleanup completed.
 goto :eof
 
 :ensure_runtime
@@ -196,24 +215,85 @@ if defined RUNTIME_FILE (
     if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
 )
 set "RUNTIME_FILE=%TEMP%\pipeline_runtime_%RANDOM%_%RANDOM%.tmp"
-python -m src.cli.main print-runtime --config "%CONFIG%" --format env >"%RUNTIME_FILE%"
+set "RUNTIME_RAW=%RUNTIME_FILE%.raw"
+REM Compute runtime metadata inside Docker first to avoid local Python dependency
+set "CONFIG_POSIX=%CONFIG%"
+set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
+set "PRINT_RUNTIME_CMD=python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env"
+if defined DEBUG_PIPELINE (
+    echo [TRACE] debug mode: filtering runtime output inside container
+    set "PRINT_RUNTIME_CMD=python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env | grep -E '^[A-Z][A-Z0-9_]*='"
+)
+docker compose run --rm --no-deps -T sft bash -lc "%PRINT_RUNTIME_CMD%" >"%RUNTIME_RAW%"
 set "STATUS=%ERRORLEVEL%"
+if defined DEBUG_PIPELINE echo [DEBUG] docker probe status=%STATUS%
+if defined DEBUG_PIPELINE echo [TRACE] after docker probe
+if "%STATUS%"=="0" goto :after_runtime_probe
+
+echo [RUNTIME] Docker runtime probe failed (%STATUS%). Falling back to local Python...
+python -m src.cli.main print-runtime --config "%CONFIG%" --format env >"%RUNTIME_RAW%"
+set "STATUS=%ERRORLEVEL%"
+if defined DEBUG_PIPELINE echo [DEBUG] local probe status=%STATUS%
 if not "%STATUS%"=="0" (
+    if exist "%RUNTIME_RAW%" del "%RUNTIME_RAW%" >nul 2>&1
     if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
     exit /b %STATUS%
 )
-for /f "usebackq tokens=1,* delims==" %%A in ("%RUNTIME_FILE%") do (
-    set "%%A=%%B"
+
+:after_runtime_probe
+REM DEBUG: temporarily disable runtime raw dump to isolate issue
+REM if defined DEBUG_PIPELINE call :debug_dump "runtime raw" "%RUNTIME_RAW%"
+set "FILTER_EXIT="
+if defined DEBUG_PIPELINE echo [TRACE] before findstr
+findstr /R "^[A-Z][A-Z0-9_]*=" "%RUNTIME_RAW%" >"%RUNTIME_FILE%" 2>nul
+set "FILTER_EXIT=%ERRORLEVEL%"
+if defined DEBUG_PIPELINE echo [DEBUG] findstr errorlevel=%FILTER_EXIT%
+if defined DEBUG_PIPELINE echo [TRACE] before filtered dump
+if not "%FILTER_EXIT%"=="0" (
+    if defined DEBUG_PIPELINE call :debug_dump "runtime raw (filter failed)" "%RUNTIME_RAW%"
+)
+if defined DEBUG_PIPELINE call :debug_dump "runtime filtered" "%RUNTIME_FILE%"
+if defined DEBUG_PIPELINE echo [TRACE] before for-loop
+for /f "usebackq tokens=* delims=" %%L in ("%RUNTIME_FILE%") do (
+    if not "%%L"=="" (
+        if defined DEBUG_PIPELINE echo [DEBUG] raw line: %%L
+        echo(%%L| findstr /R "^[A-Z][A-Z0-9_]*=" >nul
+        if not errorlevel 1 for /f "tokens=1,* delims==" %%A in ("%%L") do (
+            set "%%A=%%B"
+        )
+    )
 )
 if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
+if exist "%RUNTIME_RAW%" del "%RUNTIME_RAW%" >nul 2>&1
 if not defined COMPOSE_PROJECT (
     echo [ERROR] Runtime metadata missing COMPOSE_PROJECT.
     exit /b 2
 )
 exit /b 0
 
+:debug_dump
+setlocal EnableExtensions EnableDelayedExpansion
+set "_DESC=%~1"
+set "_FILE=%~2"
+echo [DEBUG] %_DESC% path=%_FILE%
+if exist "%_FILE%" (
+    for %%F in ("%_FILE%") do echo [DEBUG] %_DESC% size=%%~zF
+    echo [DEBUG] %_DESC% content begin
+    type "%_FILE%"
+    echo [DEBUG] %_DESC% content end
+) else (
+    echo [DEBUG] %_DESC% missing
+)
+endlocal
+goto :eof
+
 :compose
-docker compose -p "%COMPOSE_PROJECT%" %*
+if defined COMPOSE_PROJECT (
+    docker compose -p "%COMPOSE_PROJECT%" %*
+)
+if not defined COMPOSE_PROJECT (
+    docker compose %*
+)
 exit /b %ERRORLEVEL%
 
 :capture_container_logs
@@ -253,6 +333,7 @@ echo    export-merged        Merge LoRA adapter into base model
 echo    eval-sft             Run evaluation checks
 echo    serve-vllm           Launch vLLM server on merged model
 echo    show-last            Print path to latest log folder
+echo    clean|prune          Stop project, remove orphans and prune unused Docker resources
 echo.
 echo Example:
 echo    run_pipeline.bat preprocess-sft CONFIG=config.prod.yaml
