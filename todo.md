@@ -24,18 +24,19 @@
     - [ ] Remove temporary debug traces and helper blocks from run_pipeline.bat, keep only essential in-container filtering and minimal logging.
     - [x] Retest run_pipeline.bat up (default config) and verify pipeline starts without ". était inattendu." errors.
 
-# v3 Preprocess
+# v3 Preprocess, SFT, merge, console cleaning
 - [x] Execute `run_pipeline.bat preprocess-sft` (smoke config)
+- [x] Execute `run_pipeline.bat finetune-sft` fresh run
 - [x] verify Naming convention: run_pipeline.bat commands should always use the correct naming
+- [x] make CLI console less noisy
+- [x] Execute `run_pipeline.bat export-merged`
 
-# v4 , SFT and merge
-- [ ] Execute `run_pipeline.bat finetune-sft` fresh run
-- [ ] Execute `run_pipeline.bat finetune-sft RESUME_FROM=latest` for resume validation
-- [ ] Execute `run_pipeline.bat export-merged`
-- [ ] Execute `run_pipeline.bat export-merged RESUME_FROM=latest` (idempotence check)
+# v4 resume, 
 - [ ] save as `awq` --> vLLM
 
-# v4
+# v5
+- [ ] Execute `run_pipeline.bat finetune-sft RESUME_FROM=latest` for resume validation
+- [ ] Execute `run_pipeline.bat export-merged RESUME_FROM=latest` (idempotence check)
 - [ ] Execute `run_pipeline.bat eval-sft`
 - [ ] Execute `run_pipeline.bat serve-vllm`
 - [ ] Capture & document any fixes/tests for encountered issues

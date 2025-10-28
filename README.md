@@ -153,13 +153,35 @@ Open WebUI is preconfigured to talk to the vLLM OpenAI endpoint inside the compo
 - Output directories include the dataset sample size: `outputs/<dataset>_<nX|full>_<model>/...`.
 - Console output stays tidy; dive into `run.log` for full stack traces and inspect `console.log`
   when you need the plain-text CLI output that appeared on screen.
+  
+Logging behaviour (what you see vs what is recorded)
+
+- By default the interactive console is intentionally quiet and only shows WARNING and higher.
+  This keeps the terminal readable during long runs. All DEBUG/INFO messages (including per-step
+  and per-eval metric snapshots) are written to the stage `run.log` file under the run folder
+  (e.g. `logs/log_v01_.../train/run.log`).
+- Warnings, deprecation notes, and library INFO/DEBUG entries are also captured in `run.log` so
+  you can inspect them later without cluttering the console.
+- Progress bars are labelled by stage: `TRAIN` for fine-tuning, `EVAL` for evaluation, and
+  `PREPROC-*` / `MAP` during preprocessing so it is clear which task is currently running.
+- To change the behaviour, edit `config.yaml` under the `logging` section:
+  - `console_level`: controls the interactive console level (e.g. `WARNING`, `INFO`, `DEBUG`).
+  - `file_level`: controls what's written to `run.log` (typically `DEBUG`).
+  After changing the config, rerun the desired stage; the CLI will apply the new levels when it creates the run dir.
 - Regression coverage: `pytest tests/test_failure_logging.py` ensures failures persist rich traceback
   context in both log files.
 
 ## vLLM serving
 
 - Point `serve.served_model_relpath` in `config.yaml` to the merged folder under `outputs/`; the helper
-  expands it to `/models/...` inside the container.
+  expands it to `/models/...` inside the container. If the config value is falsy or explicitly set to the string `"none"` (case-insensitive), the CLI will default to the merged output directory for the
+  project (the same directory produced by `export-merged`). When you provide a custom relpath it will be   normalized (backslashes -> forward slashes and leading/trailing slashes removed) before use. The runtime probe emits two variables you can inspect or inject into compose:
+  - `SERVED_MODEL_RELPATH`: the chosen relative path under the project (normalized)
+  - `SERVED_MODEL_PATH`: the container path, i.e. `/models/<SERVED_MODEL_RELPATH>`
+
+  Note: `SERVED_MODEL_NAME` is preserved exactly as supplied in `config.yaml`. If you omit an explicit
+  `served_model_name` you will need to provide the model name manually when running the smoke-test or
+  when pointing clients at the vLLM server.
 - `run_pipeline.bat serve-vllm` injects `SERVED_MODEL_PATH`, `SERVED_MODEL_NAME`, and
   `SERVED_MODEL_MAX_LEN` before calling `docker compose` with the dynamic project name.
 - The `vllm-server` service still mounts `\\pc-27327\D\LLM`; copy or symlink your merged model there if

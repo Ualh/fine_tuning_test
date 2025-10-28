@@ -115,6 +115,17 @@ services:
 
     Logs are under `logs/log_vXX_.../<stage>/` and the latest path is stored in `logs/latest.txt`.
 
+    Logging behaviour
+
+    - The CLI routes verbose and debug output to the per-run `run.log` file so you can inspect
+      per-step metric snapshots, library INFO/DEBUG, and full tracebacks there without cluttering
+      the interactive console.
+    - The interactive console is intentionally set to show only WARNING+ by default. If you prefer
+      more verbose terminal output, update the `logging.console_level` value in `config.yaml` to
+      `INFO` or `DEBUG`. `logging.file_level` controls the granularity written to `run.log` (keep
+      this at `DEBUG` to capture everything).
+
+
     ## 7) Tips
     - Out-of-memory? Lower `train.batch_size`, raise `train.gradient_accumulation`, keep `train.gradient_checkpointing: true`.
     - Precision hiccups? Turn off `fp16` first; keep `bf16` if on Ampere/Ada.

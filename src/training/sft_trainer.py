@@ -9,11 +9,14 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 import inspect
+import warnings
 
 import torch
 from datasets import Dataset, DatasetDict, Features, Value
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
+from transformers import TrainerCallback
+from transformers.trainer_callback import ProgressCallback, PrinterCallback
 from huggingface_hub import login as hf_login
 from trl import SFTTrainer
 
@@ -22,6 +25,63 @@ from ..core.config import PreprocessConfig, TrainConfig
 from ..core.io_utils import atomic_write_json, ensure_dir
 from ..core.ssl import disable_ssl_verification
 from ..core.tokenizer_utils import ensure_chat_template
+
+
+class StageProgressCallback(ProgressCallback):
+    """Progress callback that labels tqdm bars to match pipeline stages."""
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        # Call the superclass when running under a real Trainer state; tests
+        # sometimes pass a minimal dummy object that lacks attributes the
+        # base implementation expects (e.g. is_world_process_zero). In that
+        # case fall back to initialising a progress bar via the internal
+        # factory so tests can monkeypatch `_init_progress_bar`.
+        bar = None
+        try:
+            super().on_train_begin(args, state, control, **kwargs)
+            bar = getattr(self, "training_bar", None)
+        except Exception:
+            init = getattr(self, "_init_progress_bar", None)
+            if callable(init):
+                bar = init()
+
+        if bar is not None:
+            try:
+                bar.set_description("TRAIN")
+            except Exception:
+                pass
+
+    def on_eval_begin(self, args, state, control, **kwargs):
+        bar = None
+        try:
+            super().on_eval_begin(args, state, control, **kwargs)
+            bar = getattr(self, "evaluation_bar", None)
+        except Exception:
+            init = getattr(self, "_init_progress_bar", None)
+            if callable(init):
+                bar = init()
+
+        if bar is not None:
+            try:
+                bar.set_description("EVAL")
+            except Exception:
+                pass
+
+    def on_predict_begin(self, args, state, control, **kwargs):
+        bar = None
+        try:
+            super().on_predict_begin(args, state, control, **kwargs)
+            bar = getattr(self, "prediction_bar", None)
+        except Exception:
+            init = getattr(self, "_init_progress_bar", None)
+            if callable(init):
+                bar = init()
+
+        if bar is not None:
+            try:
+                bar.set_description("EVAL")
+            except Exception:
+                pass
 
 
 @dataclass
@@ -56,6 +116,7 @@ class SFTTrainerRunner:
     ) -> TrainingSummary:
         output_dir = ensure_dir(output_dir)
         disable_ssl_verification()
+        self._configure_warning_filters()
         # Pick up HF token explicitly to support gated model downloads
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
         if hf_token:
@@ -131,6 +192,30 @@ class SFTTrainerRunner:
             report_to=["tensorboard"],
         )
 
+        # Small callback to capture Trainer/TRL logging events (metrics)
+
+        class MetricLoggerCallback(TrainerCallback):
+            """Trainer callback that writes metrics dicts to the pipeline logger at INFO level.
+
+            The Trainer and TRL internals sometimes emit metric dicts via their
+            own logging/print paths; by capturing on_log we centralise those
+            events and ensure they flow through our logger (and therefore into
+            the run.log file) instead of leaking to stdout.
+            """
+
+            def __init__(self, logger):
+                self._logger = logger
+
+            def on_log(self, args, state, control, **kwargs):
+                logs = kwargs.get("logs") or kwargs.get("metrics") or None
+                if isinstance(logs, dict):
+                    try:
+                        # Keep this at INFO so the console handler (WARNING)
+                        # doesn't show it, but the file handler records it.
+                        self._logger.info("TRAIN_METRICS: %s", json.dumps(logs, default=str))
+                    except Exception:
+                        self._logger.info("TRAIN_METRICS: %s", logs)
+
         trainer = SFTTrainer(
             model=model,
             tokenizer=tokenizer,
@@ -141,14 +226,32 @@ class SFTTrainerRunner:
             max_seq_length=self.config.cutoff_len,
             packing=self.preprocess_config.pack_sequences,
             peft_config=peft_config,
+            callbacks=[MetricLoggerCallback(self.logger)],
         )
 
-        metrics = trainer.train(resume_from_checkpoint=str(resume_path) if resume_path else None).metrics
+        # Replace the default progress callback with stage-aware labels and drop printer spam.
+        trainer.remove_callback(ProgressCallback)
+        trainer.remove_callback(PrinterCallback)
+        trainer.add_callback(StageProgressCallback())
+
+        # Run training; the Trainer/TRL internals will call our callback with
+        # intermediate metrics. We also log the returned metrics dict explicitly
+        # to ensure final metrics are recorded.
+        train_result = trainer.train(resume_from_checkpoint=str(resume_path) if resume_path else None)
+        metrics = getattr(train_result, "metrics", {}) or {}
+        try:
+            self.logger.info("FINAL_TRAIN_METRICS: %s", json.dumps(metrics, default=str))
+        except Exception:
+            self.logger.info("FINAL_TRAIN_METRICS: %s", metrics)
         adapter_dir = ensure_dir(output_dir / "adapter")
         trainer.save_model(str(adapter_dir))
         tokenizer.save_pretrained(adapter_dir)
 
         final_metrics = trainer.evaluate()
+        try:
+            self.logger.info("FINAL_EVAL_METRICS: %s", json.dumps(final_metrics, default=str))
+        except Exception:
+            self.logger.info("FINAL_EVAL_METRICS: %s", final_metrics)
         summary = TrainingSummary(
             output_dir=output_dir,
             train_loss=metrics.get("train_loss", float("nan")),
@@ -158,6 +261,26 @@ class SFTTrainerRunner:
         )
         atomic_write_json({"train": asdict(summary)}, output_dir / "metadata.json")
         return summary
+
+    def _configure_warning_filters(self) -> None:
+        warnings.filterwarnings(
+            "ignore",
+            message="Deprecated argument(s) used in '__init__': dataset_text_field, max_seq_length.*",
+            category=FutureWarning,
+            module="huggingface_hub.utils._deprecation",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message="You passed a `max_seq_length` argument to the SFTTrainer.*",
+            category=UserWarning,
+            module="trl.trainer.sft_trainer",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message="You passed a `dataset_text_field` argument to the SFTTrainer.*",
+            category=UserWarning,
+            module="trl.trainer.sft_trainer",
+        )
 
     @staticmethod
     def _load_jsonl_splits(data_dir: Path) -> DatasetDict:
