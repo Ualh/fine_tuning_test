@@ -82,11 +82,13 @@ awq:
   enabled: true
   gpu_enabled: false
   method: awq
-  scheme: symmetric
-  num_calibration_samples: null
-  calib_text_file: null
+  scheme: W4A16_ASYM
+  num_calibration_samples: 32
+  calib_text_file: prepared/awq_calibration.txt
   extra_args: []
   use_smoothquant: true
   smoothquant_strength: 0.8
-  max_seq_length: null
+  max_seq_length: 1024
   output_suffix: awq
+  ignore:
+    - lm_head

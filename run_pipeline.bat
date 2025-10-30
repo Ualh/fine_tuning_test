@@ -96,13 +96,17 @@ REM ============================= Commands =====================================
 REM ============================================================================
 :build
 REM Build should not require runtime metadata; call docker compose directly
-docker compose build
+if "%DEBUG_PIPELINE%"=="1" (
+    docker compose build
+) else (
+    docker compose build --quiet
+)
 goto :eof
 
 :up
 call :ensure_runtime
 if errorlevel 1 goto :eof
-call :compose up -d %SERVICE%
+    call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
 goto :eof
 
 :down
@@ -125,7 +129,7 @@ set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main preprocess-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
-call :compose up -d %SERVICE%
+    call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs preprocess
@@ -140,7 +144,7 @@ set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main finetune-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
-call :compose up -d %SERVICE%
+    call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs finetune
@@ -154,7 +158,7 @@ set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main export-merged --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
-call :compose up -d %SERVICE%
+    call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs export
@@ -166,16 +170,20 @@ call :capture_container_logs export
 set "RUN_AWQ=0"
 if defined FORCE_AWQ set "RUN_AWQ=1"
 if "%AWQ_ENABLED%"=="1" set "RUN_AWQ=1"
+    
+    REM Verbose AWQ decision logging
+    echo [AWQ] Decision vars: AWQ_ENABLED=%AWQ_ENABLED% FORCE_AWQ=%FORCE_AWQ% MERGED_DIR=%MERGED_DIR%
+    echo [AWQ] Computed RUN_AWQ=%RUN_AWQ%
 if "%RUN_AWQ%"=="1" (
     if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
     set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
     set "CONFIG_POSIX=%CONFIG_POSIX%"
-    set "RUNNER_CMD=bash -lc \"python3 /workspace/scripts/awq_runner.py --config '/workspace/%CONFIG_POSIX%' --merged '/workspace/%MERGED_DIR%' --out '/workspace/%OUT_REL%'\""
+    set "RUNNER_CMD=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
     if defined FORCE_AWQ (
-        set "RUNNER_CMD=bash -lc \"python3 /workspace/scripts/awq_runner.py --config '/workspace/%CONFIG_POSIX%' --merged '/workspace/%MERGED_DIR%' --out '/workspace/%OUT_REL%' --force\""
+        set "RUNNER_CMD=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL! --force"
     )
-    echo [CMD] %RUNNER_CMD%
-    call :compose run --rm --no-deps -T awq-runner %RUNNER_CMD%
+    echo [CMD] !RUNNER_CMD!
+    call :compose run --rm --no-deps --entrypoint "" -T awq-runner !RUNNER_CMD!
     set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
     call :capture_container_logs convert-awq
 )
@@ -196,12 +204,12 @@ if "%RUN_AWQ%"=="1" (
     if not defined MERGED_DIR (echo [ERROR] MERGED_DIR not set in runtime; cannot run AWQ & exit /b 2)
     if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
     set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
-    set "CMD=bash -lc \"python3 /workspace/scripts/awq_runner.py --config '/workspace/%CONFIG_POSIX%' --merged '/workspace/%MERGED_DIR%' --out '/workspace/%OUT_REL%'\""
+    set "CMD=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
     if defined FORCE_AWQ (
-        set "CMD=bash -lc \"python3 /workspace/scripts/awq_runner.py --config '/workspace/%CONFIG_POSIX%' --merged '/workspace/%MERGED_DIR%' --out '/workspace/%OUT_REL%' --force\""
+        set "CMD=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL! --force"
     )
-    echo [CMD] %CMD%
-    call :compose run --rm --no-deps -T awq-runner %CMD%
+    echo [CMD] !CMD!
+    call :compose run --rm --no-deps --entrypoint "" -T awq-runner !CMD!
     set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
     call :capture_container_logs convert-awq
 ) else (
@@ -218,7 +226,7 @@ set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main eval-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
-call :compose up -d %SERVICE%
+call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs eval
@@ -241,7 +249,7 @@ set "SERVED_MODEL_PATH=%SERVED_MODEL_PATH%"
 set "SERVED_MODEL_NAME=%SERVED_MODEL_NAME%"
 set "SERVED_MODEL_MAX_LEN=%SERVED_MODEL_MAX_LEN%"
 REM Bring up vLLM along with monitoring and UI
-call :compose up -d %VLLM_SERVICE% dozzle open-webui
+    call :compose up %COMPOSE_NO_BUILD_FLAG% -d %VLLM_SERVICE% dozzle open-webui
 if errorlevel 1 goto :eof
 echo [INFO] vLLM server exposed on http://%SERVE_DISPLAY%:%SERVE_PORT%
 echo [INFO] Dozzle logs UI:      http://localhost:9999
@@ -275,6 +283,14 @@ set "RUNTIME_LOADED=1"
 echo [RUNTIME] COMPOSE_PROJECT=%COMPOSE_PROJECT%
 if defined DATASET_NAME echo [RUNTIME] dataset=%DATASET_NAME% sample=%DATASET_SAMPLE_SIZE% base=%BASE_MODEL_NAME%
 if "%DEBUG_PIPELINE%"=="1" echo [RUNTIME] debug pipeline mode enabled
+:: Set compose flags depending on debug pipeline setting. When debug is off we
+:: avoid triggering image rebuilds during `docker compose up` to suppress
+:: verbose build output. The `:build` target still allows explicit builds.
+if "%DEBUG_PIPELINE%"=="1" (
+    set "COMPOSE_NO_BUILD_FLAG="
+) else (
+    set "COMPOSE_NO_BUILD_FLAG=--no-build"
+)
 goto :eof
 
 :load_runtime
@@ -367,6 +383,7 @@ echo    finetune-sft         Run LoRA fine-tuning stage
 echo    export-merged        Merge LoRA adapter into base model
 echo    eval-sft             Run evaluation checks
 echo    serve-vllm           Launch vLLM server on merged model
+echo    convert-awq          Run AWQ conversion using the awq-runner sidecar
 echo    show-last            Print path to latest log folder
 echo    clean|prune          Stop project, remove orphans and prune unused Docker resources
 echo.

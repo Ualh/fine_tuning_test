@@ -289,7 +289,7 @@ class ConfigLoader:
         else:
             extra_args = list(parse_comma_separated(extra or ""))
 
-    calib = data.get("calib_text_file")
+        calib = data.get("calib_text_file")
         calib_path = self._resolve_path(calib) if calib else None
 
         raw_num = data.get("num_calibration_samples")

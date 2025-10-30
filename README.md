@@ -71,6 +71,32 @@ All tunables live in `config.yaml`:
 
 CLI options mirror these fields so you can override values without editing the YAML.
 
+## AWQ conversion (llm-compressor)
+
+This project ships an isolated `awq-runner` image and a small runner script that calls `llmcompressor`'s oneshot pathway to produce AWQ-compressed model outputs.
+
+- Supported llm-compressor version used for verification: 0.8.1 (installed in the `awq-runner` image).
+- The runner entrypoint is `python3 -m src.training.awq_runner`; it prefers a system `llmcompressor` CLI when available but falls back to `python -m llmcompressor.oneshot` if not.
+- Minimal AWQ-related `config.yaml` keys (under `awq`): `enabled`, `gpu_enabled`, `method`, `scheme`, `num_calibration_samples`, `calib_text_file`, `use_smoothquant`, `smoothquant_strength`, `max_seq_length`, `output_suffix`, `ignore`.
+
+Quick run (Windows PowerShell):
+
+```powershell
+run_pipeline.bat convert-awq CONFIG=debug_config.yaml
+run_pipeline.bat convert-awq CONFIG=config.yaml
+```
+
+After a successful run inspect:
+
+- `outputs/<run>/merged_awq/metadata.json` — should show `"returncode": 0` on success.
+- `logs/<run>/convert-awq/container.log` — runner and llm-compressor logs for debugging.
+
+Notes:
+
+- The runner requires the merged model directory to exist (`outputs/.../merged`). If you see "Merged model path not found", run `run_pipeline.bat export-merged` first.
+- If `llmcompressor` console script is missing in the container, the runner will use the Python entrypoint which is supported in tested setups.
+
+
 ## Environment setup
 
 ```powershell

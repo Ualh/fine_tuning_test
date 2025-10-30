@@ -1,0 +1,9 @@
+{
+  "invoked_at": "2025-10-30T14:47:11.204896Z",
+  "merged_path": "'/workspace/outputs/alpaca_n32_Qwen2.5-0.5B/merged'",
+  "out_path": "'/workspace/'",
+  "options": {},
+  "attempts": [],
+  "returncode": 2,
+  "stderr_tail": "[Errno 2] No such file or directory: \"'/workspace/debug_config.yaml'\""
+}

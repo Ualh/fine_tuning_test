@@ -88,41 +88,65 @@
         - [x] Inspect Dockerfile top lines for ARG declaration
         - [x] redeclared ARG for LLMCOMPRESSOR_VERSION in the GPU stage
         - [x] Rebuild to confirm fix
-    - [ ] Smoke test import: `docker compose run --rm --no-deps -T awq-runner bash -lc "python3 -c 'import llmcompressor; print(\"awq ok\", llmcompressor.__version__)'"`
-    - [ ] Run compression: `docker compose run --rm --no-deps -T awq-runner bash -lc "python3 /workspace/scripts/awq_runner.py --config '/workspace/debug_config.yaml' --merged '/workspace/outputs/<MERGED_REL>/merged' --out '/workspace/outputs/<MERGED_REL>/merged/awq' --force"`
-    - [ ] Inspect `metadata.json` and logs for correctness.
-- [ ] Docker & rebuild
-    - [ ] Update Dockerfile and requirements.txt. Rebuild:
-        ```powershell
-        docker compose build --no-cache sft
-        ```
-    - [ ] verify into container:
-        ```powershell
-        docker compose up -d sft
-        docker compose exec sft bash -lc "python -c 'import llm_compressor; print(\"llc ok\")'"
-        ```
-    - [ ] add test Container import — confirm `llm_compressor` is available in Docker.
-- [ ] End-to-end test
-    - [ ] Convert-LLC run — execute CLI in container and check metadata/logs.
-    - [ ] Wrapper behavior — ensure `run_pipeline.bat` triggers convert-llc correctly.
-- [ ] Update docs `5.awq_conversion.md` with usage and troubleshooting.
-- [ ] Integration run & logs
-    - Run:
-        ```powershell
-        .\run_pipeline.bat convert-llc CONFIG=debug_config.yaml
-        ```
-    - Capture and inspect `logs/<run>/convert-llc/container.log`.
-- [ ] Cleanup & PR
-    - Remove deprecated AWQ code or keep it in `archive/`.
-    - Create PR with changes, tests and docs; request review and run CI.
-- [ ] Update config files and config loader to include AWQ options.
-- [ ] add test for it
-- [ ] execute the test inside the running container interactively by using docker exec -it <container> bash -lc "<python command>" where `-it` attaches our terminal to the container process’s STDOUT/STDERR, so logs and tracebacks stream directly to our PowerShell window in real time.
-- [ ] docs
+    - [x] debug
+        - [x] **Check which converter path is running**
+            - Inspect `run_pipeline.bat` for `convert-awq` command.
+            - Verify `main.py` calls `docker compose run awq-runner` (not AutoAWQ).
+            - Look for `llmcompressor compress` in logs; if you see `awq.quantize.quantizer`, it’s old code.
+        - [x] **Rebuild the awq-runner image without cache**
+            - Run:  
+                ```powershell
+                docker compose build --no-cache awq-runner
+                ```
+            - Confirm updated `awq_runner.py` and llm-compressor are included.
+        - [x] **Verify llm-compressor CLI availability**
+            - Exec into container:  
+                ```powershell
+                docker compose run --rm --no-deps --entrypoint bash awq-runner -lc "llmcompressor --help || python3 -m llmcompressor.oneshot --help"
+                ```
+            - Current status: only the `oneshot` entrypoint resolves; plain `llmcompressor` script is missing in 0.8.1. Track upstream or add our own console script shim so the wrapper can prefer CLI when available.
+        - [x] **Remove AutoAWQ from runtime**
+            - awq-runner: `pip show autoawq` already returns "not installed" (✅).
+            - sft image still ships AutoAWQ 0.2.9 — strip it from the Dockerfile/requirements and rebuild (`docker compose build --no-cache sft`).
+            - After rebuild, rerun `pip show autoawq` inside `sft`; ensure only `llmcompressor` remains so no legacy fallback occurs.
+        - [x] **Validate wiring of convert-awq call**
+            - Ensure `run_pipeline.bat convert-awq` uses:
+                - `--config <workspace>/config.yaml`
+                - `--merged <workspace>/outputs/.../merged`
+                - `--out <workspace>/outputs/.../merged_awq`
+            - Check GPU flags in docker-compose for awq-runner.
+        - [x] **Use local calibration data**
+            - Update `config.yaml` and `debug_config.yaml`:
+                - `awq.calib_text_file` → local file path.
+                - `awq.num_calibration_samples` → 128–512.
+                - `awq.max_seq_length` → 1024–2048.
+            - For AWQ W4A16, use CLI path first.
+        - [x] **Re-run convert-awq and validate outputs**
+        - Check:
+            - `outputs/<run>/merged_awq` exists.
+            - `metadata.json` → `returncode == 0`.
+            - Logs in `logs/log_vXX.../convert-awq/` show no exceptions.
+        - [ ] **Document working settings**
+        - Record configs and versions in `5.awq-compression.md` and README.
+        
+    - [x] Inspect `metadata.json` and logs for correctness.
+- [x] Cleanup - Remove deprecated AWQ code
+
 # v5
+## implementing tensorboard to track live metrics via port 6006
+- [ ] Add `tensorboard>=2.16` to requirements.txt and rebuild the `sft` image, checking for dependency conflicts
+- [ ] Wire Trainer to `report_to=["tensorboard"]`, set `logging_dir` to `<run_dir>/tensorboard`, and tune `logging_steps`
+- [ ] Add `training.report_to`, `training.logging_dir`, and `training.logging_steps` to config.yaml and config dataclass
+- [ ] Expose `TENSORBOARD_LOGDIR` in `_build_runtime_metadata` (main.py)
+- [ ] Add `tensorboard` service to docker-compose.yml (mount logs, port 6006, command to serve logdir) which shall be accessible on other machines in the same network
+- [ ] Add run_pipeline.bat targets: `tensorboard-up`, `tensorboard-down`, `tensorboard-logs` and print TB URL on training start
+- [ ] Create docs/8.tensorboard.md and link from README and finetune docs
+- [ ] Add tests/test_tensorboard_logging.py to assert a per-run tensorboard/ folder and events file after a minimal finetune
+- [ ] Add .gitignore entries for tensorboard output and run format/type checks
+
+# v6
 - [ ] Execute `run_pipeline.bat finetune-sft RESUME_FROM=latest` for resume validation
 - [ ] Execute `run_pipeline.bat export-merged RESUME_FROM=latest` (idempotence check)
 - [ ] Execute `run_pipeline.bat eval-sft`
 - [ ] Execute `run_pipeline.bat serve-vllm`
 - [ ] Capture & document any fixes/tests for encountered issues
-- [ ] Make eval part better by implementing tensorboard to track live metrics via port 6006

@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from datasets import Dataset
 import yaml
 
 
@@ -69,6 +70,48 @@ def _build_cli_cmd(merged: Path, out: Path, options: Dict[str, Any]) -> List[str
     return cmd
 
 
+def _resolve_workspace_path(cfg_dir: Path, raw_path: str | None) -> Path | None:
+    if not raw_path:
+        return None
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = (cfg_dir / candidate).resolve()
+    return candidate
+
+
+def _ensure_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _load_calibration_dataset(calib_file: Path) -> Dataset:
+    if not calib_file.exists():
+        raise FileNotFoundError(f"Calibration file not found: {calib_file}")
+
+    suffix = calib_file.suffix.lower()
+    if suffix in {".json", ".jsonl"}:
+        return Dataset.from_json(str(calib_file))
+    if suffix == ".csv":
+        return Dataset.from_csv(str(calib_file))
+
+    lines: List[str] = []
+    with calib_file.open("r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            text = raw_line.strip()
+            if text:
+                lines.append(text)
+
+    if not lines:
+        raise ValueError(f"Calibration file {calib_file} is empty after stripping blank lines")
+
+    return Dataset.from_dict({"text": lines})
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True, help="Path to workspace config YAML")
@@ -80,9 +123,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     group.add_argument("--cpu", action="store_true", help="Force CPU-only run")
     args = parser.parse_args(argv)
 
-    cfg_file = args.config
-    merged = args.merged
-    out = args.out
+    cfg_file = args.config.resolve()
+    merged = args.merged.resolve()
+    out = args.out.resolve()
+    cfg_dir = cfg_file.parent
 
     metadata: Dict[str, Any] = {
         "invoked_at": datetime.utcnow().isoformat() + "Z",
@@ -106,6 +150,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     options: Dict[str, Any] = dict(awq_cfg)
     metadata["options"] = options
 
+    calib_path = _resolve_workspace_path(cfg_dir, options.get("calib_text_file"))
+    if calib_path:
+        options["calib_text_file"] = str(calib_path)
+        metadata.setdefault("calibration_sources", {})["calib_text_file"] = str(calib_path)
+
+    dataset_path = _resolve_workspace_path(cfg_dir, options.get("dataset_path"))
+    if dataset_path:
+        options["dataset_path"] = str(dataset_path)
+
+    if merged.is_dir():
+        metadata["merged_exists"] = True
+    else:
+        metadata["merged_exists"] = merged.exists()
+
+    calib_dataset: Dataset | None = None
+
     enabled = bool(options.get("enabled", True))
     if not enabled and not args.force:
         print("AWQ conversion disabled in config; skipping (use --force to override)")
@@ -122,12 +182,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
 
     # Check output existence
-    if out.exists() and not args.force:
-        msg = f"Output path already exists: {out} (use --force to overwrite)"
-        metadata.update({"returncode": 5, "stderr_tail": msg})
-        _write_metadata(out, metadata)
-        print(msg, file=sys.stderr)
-        return 5
+    if out.exists():
+        if not args.force:
+            msg = f"Output path already exists: {out} (use --force to overwrite)"
+            metadata.update({"returncode": 5, "stderr_tail": msg})
+            _write_metadata(out, metadata)
+            print(msg, file=sys.stderr)
+            return 5
+        metadata["removed_existing_output"] = True
+        try:
+            if out.is_file() or out.is_symlink():
+                out.unlink()
+            else:
+                shutil.rmtree(out)
+        except Exception as exc:
+            msg = f"Failed to remove existing output {out}: {exc}"
+            metadata.update({"returncode": 2, "stderr_tail": _tail(msg)})
+            _write_metadata(out, metadata)
+            print(msg, file=sys.stderr)
+            return 2
 
     # GPU availability check (best-effort)
     gpu_requested = bool(args.gpu) or bool(options.get("gpu_enabled", False))
@@ -148,6 +221,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             _write_metadata(out, metadata)
             print(msg, file=sys.stderr)
             return 4
+
+    if calib_path:
+        try:
+            calib_dataset = _load_calibration_dataset(calib_path)
+            metadata["calibration_row_count"] = int(calib_dataset.num_rows)
+        except Exception as exc:
+            err = f"Failed to prepare calibration dataset {calib_path}: {exc}"
+            metadata.update({"returncode": 2, "stderr_tail": _tail(err)})
+            _write_metadata(out, metadata)
+            print(err, file=sys.stderr)
+            return 2
 
     # Try CLI first
     exe = None
@@ -184,40 +268,72 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         with redirect_stdout(buf_out), redirect_stderr(buf_err):
             # Build recipe similar to previous helper logic
-            recipe = []
+            recipe: List[Any] = []
             if options.get("use_smoothquant", True):
                 try:
                     from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 
                     strength = float(options.get("smoothquant_strength", 0.8))
                     recipe.append(SmoothQuantModifier(smoothing_strength=strength))
-                except Exception as e:
-                    print("Warning: cannot import SmoothQuantModifier:", e, file=sys.stderr)
+                except Exception as exc:
+                    print("Warning: cannot import SmoothQuantModifier:", exc, file=sys.stderr)
 
-            qmethod = options.get("method", "gptq")
+            method = (options.get("method") or "gptq").lower()
+            targets = _ensure_list(options.get("targets")) or ["Linear"]
+            ignore = _ensure_list(options.get("ignore"))
+
             try:
-                if qmethod and qmethod.lower() in ("gptq", "gptqmodifier"):
+                if method in ("awq", "activation-weighted-quantization"):
+                    from llmcompressor.modifiers.awq import AWQModifier
+
+                    awq_kwargs: Dict[str, Any] = {
+                        "scheme": options.get("scheme", "W4A16"),
+                        "targets": targets,
+                    }
+                    if ignore:
+                        awq_kwargs["ignore"] = ignore
+                    if options.get("awq_mappings") is not None:
+                        awq_kwargs["mappings"] = options["awq_mappings"]
+                    if options.get("awq_sequential_targets") is not None:
+                        awq_kwargs["sequential_targets"] = options["awq_sequential_targets"]
+                    if options.get("awq_duo_scaling") is not None:
+                        awq_kwargs["duo_scaling"] = bool(options["awq_duo_scaling"])
+                    recipe.append(AWQModifier(**awq_kwargs))
+                elif method in ("gptq", "gptqmodifier"):
                     from llmcompressor.modifiers.quantization import GPTQModifier
 
                     scheme = options.get("scheme", "W8A8")
-                    recipe.append(GPTQModifier(scheme=scheme, targets=options.get("targets", "Linear")))
-                elif qmethod and qmethod.lower() in ("rtn", "round-to-nearest"):
+                    recipe.append(GPTQModifier(scheme=scheme, targets=targets))
+                elif method in ("rtn", "round-to-nearest"):
                     from llmcompressor.modifiers.quantization import RoundToNearestModifier
 
                     scheme = options.get("scheme", "W8A8")
                     recipe.append(RoundToNearestModifier(scheme=scheme))
-            except Exception as e:
-                print("Warning: cannot import quantization modifiers:", e, file=sys.stderr)
+                else:
+                    if method:
+                        print(f"Warning: unsupported AWQ method '{method}', proceeding without an explicit quantization modifier", file=sys.stderr)
+            except Exception as exc:
+                print("Warning: cannot import quantization modifiers:", exc, file=sys.stderr)
 
             from llmcompressor import oneshot
 
-            call_kwargs = {"recipe": recipe, "output_dir": str(out)}
+            dataset_arg: Any = options.get("dataset")
+            if calib_dataset is not None:
+                dataset_arg = calib_dataset
+
+            call_kwargs: Dict[str, Any] = {"recipe": recipe, "output_dir": str(out)}
             if options.get("num_calibration_samples"):
                 call_kwargs["num_calibration_samples"] = int(options.get("num_calibration_samples"))
             if options.get("max_seq_length"):
                 call_kwargs["max_seq_length"] = int(options.get("max_seq_length"))
-            dataset = options.get("calib_text_file") or options.get("dataset")
-            oneshot(model=str(merged), dataset=dataset, **call_kwargs)
+            if options.get("dataset_path"):
+                call_kwargs["dataset_path"] = options.get("dataset_path")
+            if options.get("splits"):
+                call_kwargs["splits"] = options.get("splits")
+            if options.get("text_column"):
+                call_kwargs["text_column"] = options.get("text_column")
+
+            oneshot(model=str(merged), dataset=dataset_arg, **call_kwargs)
     except Exception:
         rc = 2
         traceback.print_exc(file=buf_err)
