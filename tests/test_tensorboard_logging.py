@@ -1,17 +1,19 @@
-"""Lightweight orchestration tests that exercise the Typer CLI without heavy downloads."""
+"""TensorBoard integration smoke test."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+from types import SimpleNamespace
+import json
 
 import pytest
-import yaml
 from typer.testing import CliRunner
 
 from src.cli.main import app
 from src.data.preprocess import DataPreprocessor, PreprocessSummary
-from src.training.sft_trainer import SFTTrainerRunner, TrainingSummary
+from src.training.sft_trainer import SFTTrainerRunner
+
+
 class _DummyTokenizer:
     def __init__(self) -> None:
         self.chat_template = "{{ messages }}"
@@ -25,21 +27,38 @@ class _DummyTokenizer:
         Path(directory).mkdir(parents=True, exist_ok=True)
 
     @property
-    def vocab_size(self) -> int:
+    def vocab_size(self) -> int:  # pragma: no cover - unused but mirrors interface
         return 1
 
-    def get_vocab(self) -> dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:  # pragma: no cover - unused but mirrors interface
         return {"<eos>": 0}
 
 
-class _DummyAutoTokenizer:
-    @classmethod
-    def from_pretrained(cls, *args, **kwargs):
-        return _DummyTokenizer()
+class _StubTrainer:
+    def __init__(self, *_, **kwargs) -> None:
+        self.args = kwargs.get("args")
+        self.callbacks = list(kwargs.get("callbacks", []))
+
+    def remove_callback(self, _callback_type) -> None:
+        pass
+
+    def add_callback(self, callback) -> None:
+        self.callbacks.append(callback)
+
+    def train(self, resume_from_checkpoint=None):  # pylint: disable=unused-argument
+        logdir = Path(self.args.logging_dir)
+        logdir.mkdir(parents=True, exist_ok=True)
+        (logdir / "events.out.tfevents.mock").write_text("", encoding="utf-8")
+        return SimpleNamespace(metrics={"train_loss": 0.0, "epoch": 0.1})
+
+    def evaluate(self):
+        return {"eval_loss": 0.0}
+
+    def save_model(self, output_dir: str) -> None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 
-
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def runner() -> CliRunner:
     return CliRunner()
 
@@ -84,8 +103,8 @@ def _write_temp_config(tmp_path: Path) -> Path:
             "gradient_checkpointing": False,
             "bf16": False,
             "fp16": False,
-            "logging_steps": 5,
-            "eval_steps": 5,
+            "logging_steps": 1,
+            "eval_steps": 1,
             "report_to": ["tensorboard"],
             "logging_dir": None,
             "max_steps": 1,
@@ -117,102 +136,76 @@ def _write_temp_config(tmp_path: Path) -> Path:
         },
     }
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump(base), encoding="utf-8")
+    config_path.write_text(json.dumps(base), encoding="utf-8")
     return config_path
 
 
-def _stub_preprocess_run(self, output_dir: Path, resume_dir=None):
+def _stub_preprocess(self, output_dir: Path, resume_dir=None):  # pylint: disable=unused-argument
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "train.jsonl").write_text('{"text": "hello"}\n', encoding="utf-8")
     (output_dir / "val.jsonl").write_text('{"text": "world"}\n', encoding="utf-8")
-    (output_dir / "metadata.json").write_text(json.dumps({"preprocess": {"sample_size": 2}}), encoding="utf-8")
     return PreprocessSummary(
         output_dir=output_dir,
         sample_size=2,
         kept_languages=["en"],
         discarded=0,
-        seed=self.config.seed,
+        seed=42,
     )
 
 
-def _stub_trainer_run(self, data_dir: Path, output_dir: Path, resume_path=None):
-    data_dir = Path(data_dir)
-    assert (data_dir / "train.jsonl").exists(), "preprocess output missing train.jsonl"
-    assert (data_dir / "val.jsonl").exists(), "preprocess output missing val.jsonl"
-
-    output_dir = Path(output_dir)
-    (output_dir / "adapter").mkdir(parents=True, exist_ok=True)
-    (output_dir / "trainer_state").mkdir(parents=True, exist_ok=True)
-    (output_dir / "metadata.json").write_text(
-        json.dumps({"train": {"train_loss": 0.0, "eval_loss": 0.0}}),
-        encoding="utf-8",
-    )
-    return TrainingSummary(
-        output_dir=output_dir,
-        train_loss=0.0,
-        eval_loss=0.0,
-        epochs=0.1,
-        total_tokens=32,
-    )
+def _stub_load_splits(_self, _data_dir: Path):
+    return {"train": ["train"], "validation": ["val"]}
 
 
-@pytest.mark.usefixtures("runner")
-def test_cli_preprocess_and_finetune_smoke(tmp_path, monkeypatch, runner: CliRunner):
+def test_tensorboard_events_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
     config_path = _write_temp_config(tmp_path)
-    monkeypatch.setattr("src.data.preprocess.AutoTokenizer", _DummyAutoTokenizer)
-    monkeypatch.setattr("src.training.sft_trainer.AutoTokenizer", _DummyAutoTokenizer)
-    monkeypatch.setattr(DataPreprocessor, "run", _stub_preprocess_run)
-    monkeypatch.setattr(SFTTrainerRunner, "run", _stub_trainer_run)
 
-    prepared_output = tmp_path / "prepared_out"
-    train_output = tmp_path / "train_out"
+    monkeypatch.setattr("src.data.preprocess.AutoTokenizer", lambda *args, **kwargs: _DummyTokenizer())
+    monkeypatch.setattr("src.training.sft_trainer.AutoTokenizer", lambda *args, **kwargs: _DummyTokenizer())
+    monkeypatch.setattr("src.training.sft_trainer.AutoModelForCausalLM", lambda *args, **kwargs: object())
+    monkeypatch.setattr("src.training.sft_trainer.ensure_chat_template", lambda tokenizer, logger=None: tokenizer)
+    monkeypatch.setattr("src.training.sft_trainer.torch.cuda.is_available", lambda: False)
+    monkeypatch.setattr(DataPreprocessor, "run", _stub_preprocess)
+    monkeypatch.setattr(SFTTrainerRunner, "_load_jsonl_splits", _stub_load_splits)
+    monkeypatch.setattr("src.training.sft_trainer.SFTTrainer", _StubTrainer)
 
-    prep_result = runner.invoke(
+    prep_dir = tmp_path / "prepared"
+    train_dir = tmp_path / "outputs"
+
+    result_prep = runner.invoke(
         app,
         [
             "preprocess-sft",
             "--config",
             str(config_path),
             "--output",
-            str(prepared_output),
+            str(prep_dir),
         ],
         catch_exceptions=False,
     )
-    assert prep_result.exit_code == 0, prep_result.stdout
-    assert (prepared_output / "train.jsonl").exists()
-    assert (prepared_output / "val.jsonl").exists()
+    assert result_prep.exit_code == 0, result_prep.stdout
 
-    train_result = runner.invoke(
+    result_train = runner.invoke(
         app,
         [
             "finetune-sft",
             "--config",
             str(config_path),
             "--data-dir",
-            str(prepared_output),
+            str(prep_dir),
             "--output-dir",
-            str(train_output),
+            str(train_dir),
         ],
         catch_exceptions=False,
     )
-    assert train_result.exit_code == 0, train_result.stdout
-    assert (train_output / "adapter").exists()
-    assert (train_output / "metadata.json").exists()
+    assert result_train.exit_code == 0, result_train.stdout
 
     latest_pointer = Path(tmp_path / "logs" / "latest.txt")
     assert latest_pointer.exists()
-    latest_path = Path(latest_pointer.read_text(encoding="utf-8").strip())
-    assert latest_path.exists()
-    assert latest_path.name in {"train", "preprocess"}
-
-    run_dirs = list((tmp_path / "logs").glob("log_v*/"))
-    assert run_dirs, "run directories were not created"
-    for run_dir in run_dirs:
-        for stage_dir in [p for p in run_dir.iterdir() if p.is_dir()]:
-            run_log = stage_dir / "run.log"
-            console_log = stage_dir / "console.log"
-            assert run_log.exists(), f"run.log missing in {stage_dir}"
-            assert run_log.stat().st_size > 0, f"run.log empty in {stage_dir}"
-            assert console_log.exists(), f"console.log missing in {stage_dir}"
-            assert console_log.stat().st_size > 0, f"console.log empty in {stage_dir}"
+    train_stage_dir = Path(latest_pointer.read_text(encoding="utf-8").strip())
+    tensorboard_dir = train_stage_dir / "tensorboard"
+    assert tensorboard_dir.exists(), "TensorBoard directory was not created"
+    event_files = list(tensorboard_dir.glob("events.out.tfevents*"))
+    assert event_files, "TensorBoard event files missing"
+*** End of File

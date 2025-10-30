@@ -126,3 +126,26 @@ services:
       - "3000:3000"
     depends_on:
       - vllm-server
+
+  tensorboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /app
+    command: bash -lc "tensorboard --logdir /app/logs --host 0.0.0.0 --port 6006"
+    environment:
+      CURL_CA_BUNDLE: ""
+      REQUESTS_CA_BUNDLE: ""
+      SSL_CERT_FILE: ""
+      PYTHONHTTPSVERIFY: "0"
+      HF_HUB_DISABLE_SSL_VERIFY: "1"
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_ENABLE_XET: "0"
+      GIT_SSL_NO_VERIFY: "1"
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    ports:
+      - "6006:6006"
+    depends_on:
+      - sft

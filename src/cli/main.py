@@ -504,6 +504,7 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
     adapter_rel = _rel_to_project(adapter_dir, project_root, label="Adapter directory")
     merged_rel = _rel_to_project(merged_dir, project_root, label="Merged directory")
     eval_rel = _rel_to_project(eval_dir, project_root, label="Evaluation directory")
+    logs_rel = _rel_to_project(cfg.paths.logs_dir, project_root, label="Logs directory")
 
     # Determine the served model relative path. If the config value is falsy
     # or explicitly set to the string "none" (case-insensitive), use the
@@ -537,6 +538,8 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         "SERVE_PORT": str(cfg.serve.port),
         "SERVE_HOST": cfg.serve.host,
         "DEBUG_PIPELINE": "1" if cfg.logging.debug_pipeline else "0",
+        "TENSORBOARD_LOGDIR": logs_rel.as_posix(),
+        "TENSORBOARD_LOGDIR_CONTAINER": f"/app/{logs_rel.as_posix()}",
         # AWQ / llm-compressor runtime hints for wrapper scripts
         "AWQ_ENABLED": "1" if (cfg.awq_conversion and cfg.awq_conversion.enabled) else "0",
         "AWQ_GPU_ENABLED": "1" if (cfg.awq_conversion and cfg.awq_conversion.gpu_enabled) else "0",

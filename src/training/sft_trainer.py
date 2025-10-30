@@ -170,6 +170,15 @@ class SFTTrainerRunner:
         enable_bf16 = self.config.bf16 and has_cuda
         enable_fp16 = self.config.fp16 and has_cuda and not enable_bf16
 
+        report_to = list(self.config.report_to) if getattr(self.config, "report_to", None) else ["none"]
+        tensorboard_dir_source = self.config.logging_dir if getattr(self.config, "logging_dir", None) else (self.run_dir / "tensorboard")
+        tensorboard_dir = ensure_dir(Path(tensorboard_dir_source))
+        if report_to and "tensorboard" in [item.lower() for item in report_to]:
+            try:
+                self.logger.info("TensorBoard logging enabled | directory=%s", tensorboard_dir)
+            except Exception:
+                pass
+
         training_args = TrainingArguments(
             output_dir=str(output_dir / "trainer_state"),
             num_train_epochs=self.config.epochs,
@@ -189,7 +198,8 @@ class SFTTrainerRunner:
             fp16=enable_fp16,
             gradient_checkpointing=self.config.gradient_checkpointing,
             max_steps=self.config.max_steps if self.config.max_steps else -1,
-            report_to=["tensorboard"],
+            report_to=report_to,
+            logging_dir=str(tensorboard_dir),
         )
 
         # Small callback to capture Trainer/TRL logging events (metrics)

@@ -85,6 +85,9 @@ if /I "%TARGET%"=="export-merged"  goto :export
 if /I "%TARGET%"=="eval-sft"       goto :evaluate
 if /I "%TARGET%"=="serve-vllm"     goto :serve
 if /I "%TARGET%"=="convert-awq"   goto :convert_awq
+if /I "%TARGET%"=="tensorboard-up" goto :tensorboard_up
+if /I "%TARGET%"=="tensorboard-down" goto :tensorboard_down
+if /I "%TARGET%"=="tensorboard-logs" goto :tensorboard_logs
 if /I "%TARGET%"=="show-last"      goto :showlast
 if /I "%TARGET%"=="clean"           goto :clean
 if /I "%TARGET%"=="prune"           goto :clean
@@ -140,6 +143,7 @@ call :ensure_runtime
 if errorlevel 1 goto :eof
 if defined PREPROCESS_DIR_CONTAINER echo [FINETUNE] data=!PREPROCESS_DIR_CONTAINER!
 if defined OUTPUT_DIR_CONTAINER echo [FINETUNE] output=!OUTPUT_DIR_CONTAINER!
+if defined TENSORBOARD_LOGDIR echo [FINETUNE] TensorBoard=http://localhost:6006 (logdir=!TENSORBOARD_LOGDIR!)
 set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main finetune-sft --config '%CONFIG_POSIX%'"
@@ -215,6 +219,34 @@ if "%RUN_AWQ%"=="1" (
 ) else (
     echo [AWQ] AWQ conversion not requested (AWQ_ENABLED=%AWQ_ENABLED% FORCE_AWQ=%FORCE_AWQ%)
 )
+goto :eof
+
+:tensorboard_up
+call :ensure_runtime
+if errorlevel 1 goto :eof
+echo [TENSORBOARD] Launching dashboard on http://localhost:6006
+if defined TENSORBOARD_LOGDIR echo [TENSORBOARD] tracking !TENSORBOARD_LOGDIR!
+REM Ensure the tensorboard image exists. Build explicitly to avoid `--no-build` skipping
+echo [TENSORBOARD] Ensuring tensorboard image is built
+call :compose build tensorboard
+if errorlevel 1 (
+    echo [WARN] Building tensorboard image failed or aborted; attempting to start without build
+)
+call :compose up -d tensorboard
+goto :eof
+
+:tensorboard_down
+call :ensure_runtime
+if errorlevel 1 goto :eof
+echo [TENSORBOARD] Stopping dashboard service
+call :compose stop tensorboard >nul 2>&1
+goto :eof
+
+:tensorboard_logs
+call :ensure_runtime
+if errorlevel 1 goto :eof
+echo [TENSORBOARD] Streaming container logs (Ctrl+C to stop)
+call :compose logs -f tensorboard
 goto :eof
 
 :evaluate
@@ -384,6 +416,9 @@ echo    export-merged        Merge LoRA adapter into base model
 echo    eval-sft             Run evaluation checks
 echo    serve-vllm           Launch vLLM server on merged model
 echo    convert-awq          Run AWQ conversion using the awq-runner sidecar
+echo    tensorboard-up       Start TensorBoard (port 6006)
+echo    tensorboard-down     Stop TensorBoard service
+echo    tensorboard-logs     Tail TensorBoard container logs
 echo    show-last            Print path to latest log folder
 echo    clean|prune          Stop project, remove orphans and prune unused Docker resources
 echo.

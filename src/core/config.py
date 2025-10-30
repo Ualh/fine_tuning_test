@@ -60,6 +60,8 @@ class TrainConfig:
     eval_steps: int
     max_steps: Optional[int]
     resume_from: Optional[str]
+    report_to: List[str]
+    logging_dir: Optional[Path]
 
 
 @dataclass
@@ -207,6 +209,20 @@ class ConfigLoader:
 
     def _parse_train(self) -> TrainConfig:
         data = self.raw.get("train", {})
+        report_to_raw = data.get("report_to", ["tensorboard"])
+        if isinstance(report_to_raw, (str, bytes)):
+            report_to = [item.strip() for item in str(report_to_raw).split(",") if item.strip()]
+        else:
+            report_to = [str(item).strip() for item in (report_to_raw or []) if str(item).strip()]
+        if not report_to:
+            report_to = ["none"]
+
+        logging_dir_raw = data.get("logging_dir")
+        if logging_dir_raw in (None, "", "null", "None"):
+            logging_dir = None
+        else:
+            logging_dir = self._resolve_path(logging_dir_raw)
+
         return TrainConfig(
             base_model=data.get("base_model", ""),
             cutoff_len=int(data.get("cutoff_len", 2048)),
@@ -229,6 +245,8 @@ class ConfigLoader:
             eval_steps=int(data.get("eval_steps", 100)),
             max_steps=self._to_optional_int(data.get("max_steps")),
             resume_from=self._to_optional_str(data.get("resume_from")),
+            report_to=report_to,
+            logging_dir=logging_dir,
         )
 
     def _parse_export(self) -> ExportConfig:

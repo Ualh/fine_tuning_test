@@ -164,6 +164,7 @@ plus a single tqdm progress bar on the console.
 
 - Dozzle (container logs UI): http://localhost:9999
 - Open WebUI (chat UI over OpenAI API): http://localhost:3000
+- TensorBoard (training metrics): http://localhost:6006 — see `docs/8.tensorboard.md`
 
 When you run `run_pipeline.bat serve-vllm`, both services are started alongside `vllm-server`.
 Open WebUI is preconfigured to talk to the vLLM OpenAI endpoint inside the compose network.

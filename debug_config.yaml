@@ -46,6 +46,9 @@ train:
   fp16: false
   logging_steps: 1
   eval_steps: 5
+  report_to:
+    - tensorboard
+  logging_dir: null
   max_steps: 10
   resume_from: null
 

@@ -150,6 +150,9 @@ prepared/
 outputs/
 logs/
 run.log
+tensorboard/
+**/tensorboard/
+**/events.out.tfevents*
 
 # DVC cache handled separately via DVC configuration
 

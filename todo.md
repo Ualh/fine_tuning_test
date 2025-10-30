@@ -134,15 +134,15 @@
 
 # v5
 ## implementing tensorboard to track live metrics via port 6006
-- [ ] Add `tensorboard>=2.16` to requirements.txt and rebuild the `sft` image, checking for dependency conflicts
-- [ ] Wire Trainer to `report_to=["tensorboard"]`, set `logging_dir` to `<run_dir>/tensorboard`, and tune `logging_steps`
-- [ ] Add `training.report_to`, `training.logging_dir`, and `training.logging_steps` to config.yaml and config dataclass
-- [ ] Expose `TENSORBOARD_LOGDIR` in `_build_runtime_metadata` (main.py)
-- [ ] Add `tensorboard` service to docker-compose.yml (mount logs, port 6006, command to serve logdir) which shall be accessible on other machines in the same network
-- [ ] Add run_pipeline.bat targets: `tensorboard-up`, `tensorboard-down`, `tensorboard-logs` and print TB URL on training start
-- [ ] Create docs/8.tensorboard.md and link from README and finetune docs
-- [ ] Add tests/test_tensorboard_logging.py to assert a per-run tensorboard/ folder and events file after a minimal finetune
-- [ ] Add .gitignore entries for tensorboard output and run format/type checks
+- [x] Add `tensorboard>=2.16` to requirements.txt and rebuild the `sft` image, checking for dependency conflicts
+- [x] Wire Trainer to `report_to=["tensorboard"]`, set `logging_dir` to `<run_dir>/tensorboard`, and tune `logging_steps`
+- [x] Add `training.report_to`, `training.logging_dir`, and `training.logging_steps` to config.yaml and config dataclass
+- [x] Expose `TENSORBOARD_LOGDIR` in `_build_runtime_metadata` (main.py)
+- [x] Add `tensorboard` service to docker-compose.yml (mount logs, port 6006, command to serve logdir) which shall be accessible on other machines in the same network
+- [x] Add run_pipeline.bat targets: `tensorboard-up`, `tensorboard-down`, `tensorboard-logs` and print TB URL on training start
+- [x] Create docs/8.tensorboard.md and link from README and finetune docs
+- [x] Add tests/test_tensorboard_logging.py to assert a per-run tensorboard/ folder and events file after a minimal finetune
+- [x] Add .gitignore entries for tensorboard output and run format/type checks
 
 # v6
 - [ ] Execute `run_pipeline.bat finetune-sft RESUME_FROM=latest` for resume validation

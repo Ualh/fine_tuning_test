@@ -47,6 +47,9 @@ train:
   fp16: true  # GPU-friendly default; switch to false when forcing CPU execution
   logging_steps: 20
   eval_steps: 100
+  report_to:
+    - tensorboard
+  logging_dir: null  # Default: logs/log_vXX.../train/tensorboard
   # Keep >=3 for smoke checks; set to null for full-session runs once validated.
   max_steps: null  # Default smoke pass; temporarily set to null when running full epochs
   resume_from: null
