@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -104,6 +104,28 @@ class LoggingConfig:
 
 
 @dataclass
+class AwqConversionConfig:
+    """Configuration for AWQ / llm-compressor conversion.
+
+    This replaces the old `LlmCompressorConfig`. For backward compatibility the
+    loader will accept both the top-level `awq` key and the legacy
+    `llm_compressor` key in YAML.
+    """
+    enabled: bool = False
+    gpu_enabled: bool = False
+    method: Optional[str] = None
+    scheme: Optional[str] = None
+    num_calibration_samples: Optional[int] = None
+    calib_text_file: Optional[Path] = None
+    extra_args: List[str] = field(default_factory=list)
+    use_smoothquant: bool = True
+    smoothquant_strength: float = 0.8
+    max_seq_length: Optional[int] = None
+    output_suffix: str = "awq"
+
+
+
+@dataclass
 class PipelineConfig:
     paths: PathsConfig
     preprocess: PreprocessConfig
@@ -112,6 +134,7 @@ class PipelineConfig:
     eval: EvalConfig
     serve: ServeConfig
     logging: LoggingConfig
+    awq_conversion: Optional["AwqConversionConfig"]
     project_root: Path
 
 
@@ -138,6 +161,7 @@ class ConfigLoader:
             eval=self._parse_eval(),
             serve=self._parse_serve(),
             logging=self._parse_logging(),
+            awq_conversion=self._parse_awq_conversion(),
             project_root=self.project_root,
         )
 
@@ -252,6 +276,37 @@ class ConfigLoader:
             file_level=str(data.get("file_level", "DEBUG")),
             tqdm_refresh_rate=float(data.get("tqdm_refresh_rate", 1.0)),
             debug_pipeline=bool(self._to_bool(data.get("debug_pipeline", False))),
+        )
+
+    def _parse_awq_conversion(self) -> AwqConversionConfig:
+        # Accept either `awq` (new) or `llm_compressor` (legacy) top-level keys.
+        data = self.raw.get("awq", None)
+        if data is None:
+            data = self.raw.get("llm_compressor", {}) or {}
+        extra = data.get("extra_args", [])
+        if isinstance(extra, (list, tuple)):
+            extra_args = [str(x) for x in extra]
+        else:
+            extra_args = list(parse_comma_separated(extra or ""))
+
+    calib = data.get("calib_text_file")
+        calib_path = self._resolve_path(calib) if calib else None
+
+        raw_num = data.get("num_calibration_samples")
+        num_calib = None if raw_num in (None, "", "null") else int(raw_num)
+
+        return AwqConversionConfig(
+            enabled=bool(self._to_bool(data.get("enabled", False))),
+            gpu_enabled=bool(self._to_bool(data.get("gpu_enabled", False))),
+            method=self._to_optional_str(data.get("method")),
+            scheme=self._to_optional_str(data.get("scheme")),
+            num_calibration_samples=num_calib,
+            calib_text_file=calib_path,
+            extra_args=extra_args,
+            use_smoothquant=bool(self._to_bool(data.get("use_smoothquant", True))),
+            smoothquant_strength=float(data.get("smoothquant_strength", 0.8)),
+            max_seq_length=self._to_optional_int(data.get("max_seq_length")),
+            output_suffix=str(data.get("output_suffix", "awq")),
         )
 
     # ------------------------------------------------------------------

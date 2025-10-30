@@ -6,9 +6,11 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import typer
+import shutil
+import subprocess
 
 from ..core.config import ConfigLoader, PipelineConfig
 from ..core.logger import (
@@ -23,6 +25,7 @@ from ..core.ssl import disable_ssl_verification
 from ..data.preprocess import DataPreprocessor
 from ..training.sft_trainer import SFTTrainerRunner
 from ..training.lora_merge import LoraMerger
+ 
 from ..eval.evaluator import Evaluator
 from ..serve.vllm_client import VLLMClient
 
@@ -59,6 +62,116 @@ def _default_output_dir(cfg: PipelineConfig) -> Path:
     sample_tag = "full" if (cfg.preprocess.sample_size in (None, 0)) else f"n{cfg.preprocess.sample_size}"
     model_stub = cfg.train.base_model.split("/")[-1] if cfg.train.base_model else "model"
     return cfg.paths.outputs_dir / f"{dataset_stub}_{sample_tag}_{model_stub}"
+
+
+@app.command("convert-awq")
+def convert_awq(
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
+    merged_dir: Optional[Path] = typer.Option(None, help="Merged model directory (defaults to outputs/*/merged)."),
+    output_dir: Optional[Path] = typer.Option(None, help="Where to store compressed model output."),
+    force: bool = typer.Option(False, help="Overwrite existing output if present."),
+) -> None:
+    """Run AWQ conversion using the isolated `awq-runner` sidecar (preferred) or locally.
+
+    The command will shell out to `docker compose run --rm --no-deps -T awq-runner ...`
+    when Docker is available. If Docker is not available but the environment has
+    the Python dependencies installed, it will call the in-repo runner
+    implementation (`src.training.awq_runner`) directly.
+    """
+    disable_ssl_verification()
+    cfg = _load_config(config)
+
+    run_manager = RunManager(cfg.paths.logs_dir, cfg.paths.run_metadata_file)
+    run_dir = run_manager.create_run_dir("convert-awq")
+    logger = configure_logging(
+        name="convert-awq",
+        log_dir=run_dir,
+        console_level=_level_to_int(cfg.logging.console_level),
+        file_level=_level_to_int(cfg.logging.file_level),
+    )
+
+    merged_resolved = Path(merged_dir or (_default_output_dir(cfg) / "merged"))
+    out_resolved = Path(output_dir or (_default_output_dir(cfg) / "merged_awq"))
+
+    # Check config AWQ block (loader supports legacy `llm_compressor` key)
+    awq_cfg = getattr(cfg, "awq_conversion", None)
+    enabled = True
+    gpu_enabled = False
+    if awq_cfg:
+        enabled = bool(getattr(awq_cfg, "enabled", True))
+        gpu_enabled = bool(getattr(awq_cfg, "gpu_enabled", False))
+
+    if not enabled and not force:
+        logger.info("AWQ conversion disabled in config and --force not provided; skipping conversion.")
+        finalize_logger(logger)
+        return
+
+    console_log = run_dir / "console.log"
+    try:
+        with tee_std_streams(console_log):
+            # Prefer Docker sidecar if docker available
+            if shutil.which("docker"):
+                # Build container-invocation command using workspace-relative paths
+                cfg_rel = _rel_to_project(Path(config), cfg.project_root, label="config")
+                merged_rel = _rel_to_project(merged_resolved, cfg.project_root, label="Merged directory")
+                out_rel = _rel_to_project(out_resolved, cfg.project_root, label="Output directory")
+
+                runner_cmd = (
+                    f"python3 /workspace/scripts/awq_runner.py --config '/workspace/{cfg_rel.as_posix()}' "
+                    f"--merged '/workspace/{merged_rel.as_posix()}' --out '/workspace/{out_rel.as_posix()}'"
+                )
+                if force:
+                    runner_cmd += " --force"
+                if gpu_enabled:
+                    runner_cmd += " --gpu"
+
+                docker_cmd = [
+                    "docker",
+                    "compose",
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-T",
+                    "awq-runner",
+                    "bash",
+                    "-lc",
+                    runner_cmd,
+                ]
+                logger.info("Invoking awq-runner sidecar: %s", " ".join(docker_cmd))
+                proc = subprocess.run(docker_cmd)
+                if proc.returncode != 0:
+                    logger.error("awq-runner sidecar failed (rc=%d)", proc.returncode)
+                    raise typer.Exit(code=proc.returncode)
+                logger.info("awq-runner sidecar finished successfully")
+            else:
+                # No Docker: try to run the runner locally
+                logger.info("Docker not found; attempting local AWQ runner invocation.")
+                try:
+                    from src.training.awq_runner import main as awq_main
+
+                    args = [
+                        f"--config",
+                        str(config),
+                        "--merged",
+                        str(merged_resolved),
+                        "--out",
+                        str(out_resolved),
+                    ]
+                    if force:
+                        args.append("--force")
+                    if gpu_enabled:
+                        args.append("--gpu")
+                    rc = awq_main(args)
+                    if rc != 0:
+                        logger.error("Local awq runner failed (rc=%d)", rc)
+                        raise typer.Exit(code=rc)
+                    logger.info("Local awq runner finished successfully")
+                except Exception as exc:
+                    log_exception_with_locals(logger, "Local awq runner failed", exc)
+                    raise
+    finally:
+        finalize_logger(logger)
+
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -300,6 +413,9 @@ def export_merged(
         finalize_logger(logger)
 
 
+
+
+
 @app.command("eval-sft")
 def eval_sft(
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
@@ -342,6 +458,9 @@ def eval_sft(
                 raise
     finally:
         finalize_logger(logger)
+
+
+
 
 
 def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
@@ -418,6 +537,10 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         "SERVE_PORT": str(cfg.serve.port),
         "SERVE_HOST": cfg.serve.host,
         "DEBUG_PIPELINE": "1" if cfg.logging.debug_pipeline else "0",
+        # AWQ / llm-compressor runtime hints for wrapper scripts
+        "AWQ_ENABLED": "1" if (cfg.awq_conversion and cfg.awq_conversion.enabled) else "0",
+        "AWQ_GPU_ENABLED": "1" if (cfg.awq_conversion and cfg.awq_conversion.gpu_enabled) else "0",
+        "AWQ_OUTPUT_SUFFIX": (cfg.awq_conversion.output_suffix if (cfg.awq_conversion and cfg.awq_conversion.output_suffix) else "awq"),
     }
     return runtime
 

@@ -1,6 +1,6 @@
 accelerate==1.2.1
 bitsandbytes==0.44.0; platform_system != "Windows"
-datasets==2.19.0
+datasets==2.20.0
 dvc==3.53.1
 evaluate==0.4.2
 huggingface-hub==1.0.0rc6

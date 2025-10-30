@@ -77,3 +77,16 @@ logging:
   file_level: DEBUG
   tqdm_refresh_rate: 0.5
   debug_pipeline: true
+
+awq:
+  enabled: true
+  gpu_enabled: false
+  method: awq
+  scheme: symmetric
+  num_calibration_samples: null
+  calib_text_file: null
+  extra_args: []
+  use_smoothquant: true
+  smoothquant_strength: 0.8
+  max_seq_length: null
+  output_suffix: awq

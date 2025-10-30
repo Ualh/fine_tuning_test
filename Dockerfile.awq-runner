@@ -1,0 +1,53 @@
+# AWQ runner image
+# Multi-stage Dockerfile: default `cpu` stage uses slim Python; a `gpu` stage
+# uses an NVIDIA CUDA runtime base. Build the GPU variant with:
+#   docker build --target gpu -f Dockerfile.awq-runner -t awq-runner:gpu .
+# Build CPU variant with:
+#   docker build -f Dockerfile.awq-runner -t awq-runner:cpu .
+
+ARG PYTHON_VERSION=3.11
+ARG LLMCOMPRESSOR_VERSION=0.8.1
+
+########## CPU stage (default) ##########
+FROM python:3.11-slim AS cpu
+WORKDIR /workspace
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install small system deps for building optional modifiers
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install runtime Python deps
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir llmcompressor==${LLMCOMPRESSOR_VERSION} PyYAML
+
+COPY src/training /workspace/scripts
+RUN chmod +x /workspace/scripts/*.py || true
+
+ENTRYPOINT ["/bin/sh", "-c", "tail -f /dev/null"]
+
+########## GPU stage (target: gpu) ##########
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04 AS gpu
+WORKDIR /workspace
+
+ARG LLMCOMPRESSOR_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Minimal Python install on CUDA base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv python3-pip build-essential ca-certificates git curl \
+    && ln -s /usr/bin/python3 /usr/local/bin/python3 \
+    && ln -s /usr/bin/pip3 /usr/local/bin/pip3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip and install GPU-friendly packages where appropriate
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip3 install --no-cache-dir llmcompressor==${LLMCOMPRESSOR_VERSION} PyYAML
+
+COPY src/training /workspace/scripts
+RUN chmod +x /workspace/scripts/*.py || true
+
+ENTRYPOINT ["/bin/sh", "-c", "tail -f /dev/null"]

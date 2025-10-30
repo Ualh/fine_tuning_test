@@ -49,6 +49,18 @@ if not errorlevel 1 (
     shift
     goto :parse_args
 )
+:: Support simple flags like /force by setting an env var (e.g. /force -> FORCE_AWQ=1)
+if "%ARG:~0,1%"=="/" (
+    set "FLAGNAME=%ARG:~1%"
+    if /I "%FLAGNAME%"=="force" (
+        set "FORCE_AWQ=1"
+    ) else (
+        rem Normalize: convert leading slash flags to uppercase env var with value 1
+        set "%FLAGNAME%=1"
+    )
+    shift
+    goto :parse_args
+)
 if "%~2"=="" (
     echo [ERROR] Missing value for parameter %~1
     exit /b 2
@@ -72,9 +84,11 @@ if /I "%TARGET%"=="finetune-sft"   goto :finetune
 if /I "%TARGET%"=="export-merged"  goto :export
 if /I "%TARGET%"=="eval-sft"       goto :evaluate
 if /I "%TARGET%"=="serve-vllm"     goto :serve
+if /I "%TARGET%"=="convert-awq"   goto :convert_awq
 if /I "%TARGET%"=="show-last"      goto :showlast
 if /I "%TARGET%"=="clean"           goto :clean
 if /I "%TARGET%"=="prune"           goto :clean
+
 goto :help
 
 REM ============================================================================
@@ -144,6 +158,55 @@ call :compose up -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs export
+:: Post-export: Optionally run AWQ conversion using the isolated awq-runner
+:: sidecar to avoid dependency conflicts (NumPy 2.x vs NumPy 1.x). The runner
+:: reads the repo `config.yaml` (the runtime probe exposes AWQ_ENABLED and
+:: AWQ_OUTPUT_SUFFIX). The conversion will run when AWQ_ENABLED=1 or if the
+:: caller set FORCE_AWQ=1 (or passed /force).
+set "RUN_AWQ=0"
+if defined FORCE_AWQ set "RUN_AWQ=1"
+if "%AWQ_ENABLED%"=="1" set "RUN_AWQ=1"
+if "%RUN_AWQ%"=="1" (
+    if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
+    set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
+    set "CONFIG_POSIX=%CONFIG_POSIX%"
+    set "RUNNER_CMD=bash -lc \"python3 /workspace/scripts/awq_runner.py --config '/workspace/%CONFIG_POSIX%' --merged '/workspace/%MERGED_DIR%' --out '/workspace/%OUT_REL%'\""
+    if defined FORCE_AWQ (
+        set "RUNNER_CMD=bash -lc \"python3 /workspace/scripts/awq_runner.py --config '/workspace/%CONFIG_POSIX%' --merged '/workspace/%MERGED_DIR%' --out '/workspace/%OUT_REL%' --force\""
+    )
+    echo [CMD] %RUNNER_CMD%
+    call :compose run --rm --no-deps -T awq-runner %RUNNER_CMD%
+    set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
+    call :capture_container_logs convert-awq
+)
+goto :eof
+
+:: ---------------------------------------------------------------------------
+:convert_awq
+call :ensure_runtime
+if errorlevel 1 goto :eof
+echo [AWQ] Starting AWQ conversion check
+set "CONFIG_POSIX=%CONFIG%"
+set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
+:: Decide whether to run AWQ: respect runtime AWQ_ENABLED or explicit FORCE_AWQ
+set "RUN_AWQ=0"
+if defined FORCE_AWQ set "RUN_AWQ=1"
+if "%AWQ_ENABLED%"=="1" set "RUN_AWQ=1"
+if "%RUN_AWQ%"=="1" (
+    if not defined MERGED_DIR (echo [ERROR] MERGED_DIR not set in runtime; cannot run AWQ & exit /b 2)
+    if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
+    set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
+    set "CMD=bash -lc \"python3 /workspace/scripts/awq_runner.py --config '/workspace/%CONFIG_POSIX%' --merged '/workspace/%MERGED_DIR%' --out '/workspace/%OUT_REL%'\""
+    if defined FORCE_AWQ (
+        set "CMD=bash -lc \"python3 /workspace/scripts/awq_runner.py --config '/workspace/%CONFIG_POSIX%' --merged '/workspace/%MERGED_DIR%' --out '/workspace/%OUT_REL%' --force\""
+    )
+    echo [CMD] %CMD%
+    call :compose run --rm --no-deps -T awq-runner %CMD%
+    set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
+    call :capture_container_logs convert-awq
+) else (
+    echo [AWQ] AWQ conversion not requested (AWQ_ENABLED=%AWQ_ENABLED% FORCE_AWQ=%FORCE_AWQ%)
+)
 goto :eof
 
 :evaluate
@@ -310,6 +373,8 @@ echo.
 echo Example:
 echo    run_pipeline.bat preprocess-sft CONFIG=config.prod.yaml
 exit /b 1
+
+:: Manual convert-awq target removed (migrating AWQ to llm-compressor)
 
 :eof
 REM Return to original directory

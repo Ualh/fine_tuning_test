@@ -8,8 +8,15 @@ This repo is a local, Docker-first LoRA fine-tuning pipeline for AI models with 
   - Modules map 1:1 to stages: `core/` (config, logging, resume, run manager, runtime probe, SSL bypass), `data/preprocess.py`, `training/` (`sft_trainer.py`, `lora_merge.py`), `eval/evaluator.py`, `serve/vllm_client.py`.
 
 - Reproducible environments
-  - Docker: `Dockerfile` (CUDA 12.1, Torch 2.2.2) + `docker-compose.yml` (`sft`, `vllm-server`, Dozzle, Open WebUI). Use `run_pipeline.bat up` then exec: `run_pipeline.bat bash` or `docker compose exec sft bash -lc "python3 -m src.cli.main print-runtime --format json"` (interactive `-it` is implied by wrapper; use plain `docker exec -it <container> bash -lc "…"` if you prefer).
-  - Local dev: `.venv` + `requirements.txt`; run `pytest` before heavy stages. HF token via env (`HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN`). SSL is intentionally disabled (see `core/ssl.py` and wrapper env) to survive corporate MITM.
+  - Docker: `Dockerfile` (CUDA 12.1, Torch 2.2.2) + `docker-compose.yml` (`sft`, `vllm-server`, Dozzle, Open WebUI). Use `run_pipeline.bat up` and run stage commands inside the running `sft` container interactively. Examples:
+    - With the wrapper: `run_pipeline.bat bash` (opens an interactive shell inside the container).
+    - Directly: `docker compose exec sft bash -lc "python3 -m src.cli.main print-runtime --format json"`.
+
+    Always execute commands inside the running container interactively by using:
+
+    `docker exec -it <container> bash -lc "<python command>"`
+
+    where `-it` attaches our terminal to the container process’s STDOUT/STDERR, so logs and tracebacks stream directly to our PowerShell window in real time.
 
 - Logging, error handling, and debugging
   - Use `core.logger.configure_logging` in stages: console at INFO (single, minimal progress bar from Trainer), files at DEBUG. Live, detailed traces go to `run.log`; stdout/stderr are mirrored to `console.log` via `tee_std_streams`; wrapper saves Docker logs to `container.log`.

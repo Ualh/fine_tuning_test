@@ -40,6 +40,30 @@ services:
       - ./outputs:/app/outputs
       - ./logs:/app/logs
 
+  awq-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.awq-runner
+    working_dir: /workspace
+    tty: true
+    stdin_open: true
+    # GPU support: docker compose will honor `gpus` when the host and Docker
+    # runtime support it. Use an override compose file to toggle GPU settings
+    # for CI or developer runs if you prefer not to enable GPUs by default.
+    gpus: all
+    runtime: nvidia
+    environment:
+      CURL_CA_BUNDLE: ""
+      REQUESTS_CA_BUNDLE: ""
+      SSL_CERT_FILE: ""
+      PYTHONHTTPSVERIFY: "0"
+    volumes:
+      - .:/workspace
+      - ${USERPROFILE}/.cache/huggingface:/cache/huggingface
+      - ./prepared:/workspace/prepared
+      - ./outputs:/workspace/outputs
+      - ./logs:/workspace/logs
+
   vllm-server:
     image: vllm/vllm-openai:latest
     runtime: nvidia

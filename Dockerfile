@@ -42,6 +42,7 @@ RUN pip install --no-cache-dir --default-timeout=300 \
       torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121
 
 WORKDIR /app
+## Install Python dependencies from requirements.txt (includes llmcompressor)
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
