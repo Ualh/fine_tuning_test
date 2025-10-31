@@ -81,6 +81,16 @@ logging:
   tqdm_refresh_rate: 0.5
   debug_pipeline: true
 
+naming:
+  normalize: true
+  separator: "-"
+  run_counter_scope: model_dataset
+  run_prefix: ""
+  legacy_allowed: true
+  max_segment_length: 64
+  max_name_length: 128
+  use_legacy: false
+
 awq:
   enabled: true
   gpu_enabled: false

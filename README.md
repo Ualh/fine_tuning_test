@@ -29,8 +29,8 @@ fine_tuning_test/
 Runtime directories (ignored by git):
 
 - `prepared/` – chat-formatted splits.
-- `outputs/` – adapters, trainer state, merged model, evaluation reports.
-- `logs/` – auto-incremented `log_vXX_YYYY-mm-dd_HH-MM-SS` folders with `run.log`, summaries, metadata.
+- `outputs/` – per-run folders (`outputs/<run-name>/adapter`, `merged`, `eval`, …). `outputs/latest.txt` points to the most recent run.
+- `logs/` – per-run stage logs (`logs/<run-name>/<stage>/run.log`). `logs/latest.txt` points to the newest run root.
 - `data/` – optional raw cache if you export datasets locally.
 
 ## Quick start
@@ -56,6 +56,24 @@ run_pipeline.bat bash
 # Inside container (optional):
 python3 -m src.cli.main print-runtime --format json
 ```
+
+### Run naming & overrides
+
+Every stage now resolves a canonical run slug following `<model>-<dataset>-<size>-runX` and stores all artefacts under `outputs/<run-name>/` and `logs/<run-name>/`. Use the helper to preview the slug without touching the filesystem:
+
+```powershell
+run_pipeline.bat run-name-preview
+run_pipeline.bat run-name-preview RUN_INDEX=5
+run_pipeline.bat run-name-preview FORCE_RUN_NAME=qwen2-7b-alpaca-full-run42
+```
+
+`print-runtime` echoes the same values along with helper variables (`RUN_DIR_NAME`, `RUN_OUTPUTS_DIR`, `RUN_LOGS_DIR`, container paths, etc.). To override the next run, set any of the following before invoking the pipeline:
+
+- `FORCE_RUN_NAME=<slug>` – use an explicit slug (must match `<prefix>-runX`).
+- `FORCE_RUN_INDEX=<number>` or `RUN_INDEX=<number>` – reserve a specific counter.
+- `LEGACY_RUN_NAME=<name>` + `USE_LEGACY_NAMING=1` – temporarily fall back to the legacy folder naming.
+
+All overrides propagate to the runtime probe (`print-runtime`) and to downstream container commands automatically.
 
 ## Configuration
 
@@ -157,7 +175,7 @@ run_pipeline.bat serve-vllm        # Launch vLLM on port 8080
 run_pipeline.bat clean             # Stop project, remove orphans, prune unused resources
 ```
 
-Each stage writes DEBUG logs to `logs/log_vXX_.../stage/run.log` while emitting succinct INFO messages
+Each stage writes DEBUG logs to `logs/<run-name>/<stage>/run.log` while emitting succinct INFO messages
 plus a single tqdm progress bar on the console.
 
 ### Extras: monitoring and UI
@@ -172,12 +190,12 @@ Open WebUI is preconfigured to talk to the vLLM OpenAI endpoint inside the compo
 ## Resumability & logging
 
 - Pass `RESUME_FROM=path/to/checkpoint` (or use `--resume-from` in the CLI) to continue a paused stage.
-- `logs/latest.txt` always points to the most recent stage directory.
-- Each stage now emits three log artefacts: `run.log` (DEBUG + rich tracebacks with locals),
+- `logs/latest.txt` points to the most recent run root (`logs/<run-name>/`). `outputs/latest.txt` mirrors the same run under `outputs/`.
+- Each stage emits three log artefacts inside `logs/<run-name>/<stage>/`: `run.log` (DEBUG + rich tracebacks with locals),
   `console.log` (stdout/stderr with ANSI sequences stripped), and `container.log` (tail of
   `docker logs --tail 2000` for the training container captured by `run_pipeline.bat`).
 - Metadata JSON files (`metadata.json`, `metrics.json`) summarise seeds, sizes, metrics, and timings.
-- Output directories include the dataset sample size: `outputs/<dataset>_<nX|full>_<model>/...`.
+- Run directories already encode the dataset sample size (e.g. `qwen2-7b-alpaca-full-run3`), and subfolders retain the previous layout (`adapter`, `merged`, `eval`, etc.).
 - Console output stays tidy; dive into `run.log` for full stack traces and inspect `console.log`
   when you need the plain-text CLI output that appeared on screen.
   
@@ -186,7 +204,7 @@ Logging behaviour (what you see vs what is recorded)
 - By default the interactive console is intentionally quiet and only shows WARNING and higher.
   This keeps the terminal readable during long runs. All DEBUG/INFO messages (including per-step
   and per-eval metric snapshots) are written to the stage `run.log` file under the run folder
-  (e.g. `logs/log_v01_.../train/run.log`).
+  (e.g. `logs/qwen2-7b-alpaca-full-run1/train/run.log`).
 - Warnings, deprecation notes, and library INFO/DEBUG entries are also captured in `run.log` so
   you can inspect them later without cluttering the console.
 - Progress bars are labelled by stage: `TRAIN` for fine-tuning, `EVAL` for evaluation, and

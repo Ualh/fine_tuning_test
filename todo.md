@@ -1,4 +1,4 @@
-# v2 Docker images and containers
+# v2 ✅ Docker images and containers
 - [x] verify that docker is the default run, not python in .bat file
 - [x] Build Docker image via `run_pipeline.bat build`
 - [x] Launch training container (`run_pipeline.bat up`) using smoke config
@@ -20,14 +20,14 @@
     - [ ] Remove temporary debug traces and helper blocks from run_pipeline.bat, keep only essential in-container filtering and minimal logging.
     - [x] Retest run_pipeline.bat up (default config) and verify pipeline starts without ". était inattendu." errors.
 
-# v3 Preprocess, SFT, merge, console cleaning
+# v3 ✅ Preprocess, SFT, merge, console cleaning
 - [x] Execute `run_pipeline.bat preprocess-sft` (smoke config)
 - [x] Execute `run_pipeline.bat finetune-sft` fresh run
 - [x] verify Naming convention: run_pipeline.bat commands should always use the correct naming
 - [x] make CLI console less noisy
 - [x] Execute `run_pipeline.bat export-merged`
 
-# v4 awq convert 
+# v4 ✅ awq convert 
 - [ ] save as `awq` --> vLLM using llm-compressor (pip install llmcompressor)
 - [x] Revert the autoawq attempt
     - Edit requirements.txt to remove `autoawq==...`.
@@ -125,14 +125,14 @@
         - Check:
             - `outputs/<run>/merged_awq` exists.
             - `metadata.json` → `returncode == 0`.
-            - Logs in `logs/log_vXX.../convert-awq/` show no exceptions.
+            - Logs in `logs/<run>/convert-awq/` show no exceptions.
         - [ ] **Document working settings**
         - Record configs and versions in `5.awq-compression.md` and README.
         
     - [x] Inspect `metadata.json` and logs for correctness.
 - [x] Cleanup - Remove deprecated AWQ code
 
-# v5
+# v5 ✅
 ## implementing tensorboard to track live metrics via port 6006
 - [x] Add `tensorboard>=2.16` to requirements.txt and rebuild the `sft` image, checking for dependency conflicts
 - [x] Wire Trainer to `report_to=["tensorboard"]`, set `logging_dir` to `<run_dir>/tensorboard`, and tune `logging_steps`
@@ -144,7 +144,7 @@
 - [x] Add tests/test_tensorboard_logging.py to assert a per-run tensorboard/ folder and events file after a minimal finetune
 - [x] Add .gitignore entries for tensorboard output and run format/type checks
 
-# v6 training debugging TypeError while constructing TrainingArguments in sft_trainer.py
+# v6 ✅ training debugging TypeError while constructing TrainingArguments in sft_trainer.py
 
 - [x] Reproduce the TypeError locally using a minimal debug run.
 - [x] Patch `sft_trainer.py` to only pass supported kwargs to `TrainingArguments`.
@@ -163,12 +163,40 @@
      (Implemented: `sft_trainer.py` logs an INFO when `logging_dir` is not accepted by `TrainingArguments`.)
 - [x] Add a small TrainerCallback (or a simple tensorboard SummaryWriter) that always writes metrics to your canonical tensorboard_dir regardless of whether TrainingArguments accepted logging_dir. 
 
+# v7 naming convention fix
+- [ ] standardize naming convention across all runs, logs, outputs, images, containers via `<model_name>-<dataset_name>-<dataset_size>-runX`
+    - [x] Design naming spec & contract — write spec for `<model_name>-<dataset_name>-<dataset_size>-runX`, canonical sources, normalization, run counter rules, examples and pseudocode
+    - [x] Add naming config & dataclass — add `naming` section to config.yaml and dataclass fields (normalize, separator, run_counter_scope, run_prefix, legacy_allowed)
+    - [x] Implement canonical name builder function — create `src/core/run_naming.py` with `build_run_name(...)`, sanitization, separator handling and deterministic fallback; add unit tests
+    - [x] Integrate with run manager — update run_manager.py to call builder when creating runs and return `run_name` and `run_dir`
+    - [x] Wire into CLI runtime metadata — update main.py `_build_runtime_metadata` to export `RUN_NAME`, `RUN_DIR_NAME`, `RUN_NUMBER`, `SERVED_MODEL_NAME`
+    - [x] Update run_pipeline.bat naming & container/image tags — use `RUN_NAME` for container names, image tags and output folders; add `FORCE_RUN_NAME`/`LEGACY_RUN_NAME` override and preview target
+    - [x] Docker Compose & service names — update docker-compose.yml to use `RUN_NAME` for `container_name` or labels where appropriate without breaking service references
+    - [x] Outputs/logs directory patterns and symlinks — create `outputs/<RUN_NAME>` and `logs/<RUN_NAME>` layout and maintain `outputs/latest`/`logs/latest` pointers; support dry-run preview
+    - [x] Update docs and README — update README.md and 1.setup.md to document the convention, overrides
+    - [ ] verify the name images problem, Inconsistent project name source: one command run directly on the host (build) uses the host directory as the project name; later steps call print-runtime inside a container and that produces a project name derived from inside‑container paths. 
+        - [ ] ensure the merge-export step needs a adapter path to work as a standalone command, as otherwise it will create a new ..._runX output which will not have the adapter folder in it
+        - [ ] ensure that the preprocess-sft, convert-awq, eval-sft and serve-vllm commands also work as standalone commands without creating new run folders that do not have the expected content in them.
+        - [ ] modify the commands so that finetune-sft, if provided in the config, runs merge-export, convert-awq, eval-sft and serve-vllm automatically at the end of the finetune step so we avoid the problem of isolated commands that will create new run folders 
+
+
+# v8 small fixes
+- [ ] `torch_dtype` is deprecated! Use `dtype` instead!
+- [ ] refractor configs into one folder `configs/` with `smoke.yaml`, `debug.yaml`, `default.yaml`
+- [ ] update all docs to reflect the new config paths
+- refractor tests so that they are separated into their respective folders: `tests/pipeline/`, `tests/training/`, `tests/conversion/` and so on.
+- [ ] test the tests after the move to ensure they still run correctly.
+- [ ] refractor and put all dockerfiles into a `docker/` folder for better organization.
+- [ ] verify all files are updated to reflect the new paths.
+- [ ] assess if the awq/ folder can be removed safely, if yes remove it, and verify
+- [ ] remove awq/ in docs and merge the file in it into the `5.awq-compression.md` doc.
+- [ ] check if '/ folder can be removed safely, if yes remove it, and verify
+
+# v9
+- [ ] clean a bit the docker image and containers, reduce duplication and run only one image per service + one container per run/model
+- [ ] on tensorboard, we observe that each run has the name of the log_vxx/train/tensorboard folder, we should fix that so that we have the model_name-dataset_name-dataset_size_runX
+
 # v7
-- [ ] Execute `run_pipeline.bat finetune-sft RESUME_FROM=latest` for resume validation
-- [ ] Execute `run_pipeline.bat export-merged RESUME_FROM=latest` (idempotence check)
 - [ ] Execute `run_pipeline.bat eval-sft`
 - [ ] Execute `run_pipeline.bat serve-vllm`
 - [ ] Capture & document any fixes/tests for encountered issues
-
-# v7 small fixes
-- [ ] `torch_dtype` is deprecated! Use `dtype` instead!

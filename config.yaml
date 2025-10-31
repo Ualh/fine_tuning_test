@@ -45,11 +45,11 @@ train:
   gradient_checkpointing: true
   bf16: true  # GPU-friendly default; switch to false when forcing CPU execution
   fp16: true  # GPU-friendly default; switch to false when forcing CPU execution
-  logging_steps: 20
-  eval_steps: 100
+  logging_steps: 1
+  eval_steps: 5
   report_to:
     - tensorboard
-  logging_dir: null  # Default: logs/log_vXX.../train/tensorboard
+  logging_dir: null  # Default: logs/<run-name>/train/tensorboard
   # Keep >=3 for smoke checks; set to null for full-session runs once validated.
   max_steps: null  # Default smoke pass; temporarily set to null when running full epochs
   resume_from: null
@@ -85,6 +85,16 @@ logging:
   file_level: DEBUG
   tqdm_refresh_rate: 1.0
   debug_pipeline: false  # Set true to surface verbose pipeline traces.
+
+naming:
+  normalize: true
+  separator: "-"  # Use a single character separator.
+  run_counter_scope: model_dataset  # Options: global, model, model_dataset
+  run_prefix: ""
+  legacy_allowed: true
+  max_segment_length: 64
+  max_name_length: 128
+  use_legacy: false
 
 awq:
   enabled: true

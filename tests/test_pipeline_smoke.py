@@ -204,12 +204,13 @@ def test_cli_preprocess_and_finetune_smoke(tmp_path, monkeypatch, runner: CliRun
     assert latest_pointer.exists()
     latest_path = Path(latest_pointer.read_text(encoding="utf-8").strip())
     assert latest_path.exists()
-    assert latest_path.name in {"train", "preprocess"}
+    assert latest_path.parent == tmp_path / "logs"
+    assert latest_path.name.endswith("-run1")
 
-    run_dirs = list((tmp_path / "logs").glob("log_v*/"))
+    run_dirs = list((tmp_path / "logs").glob("*-run*/"))
     assert run_dirs, "run directories were not created"
     for run_dir in run_dirs:
-        for stage_dir in [p for p in run_dir.iterdir() if p.is_dir()]:
+        for stage_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
             run_log = stage_dir / "run.log"
             console_log = stage_dir / "console.log"
             assert run_log.exists(), f"run.log missing in {stage_dir}"

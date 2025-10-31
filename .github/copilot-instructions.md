@@ -30,7 +30,7 @@ This repo is a local, Docker-first LoRA fine-tuning pipeline for AI models with 
 - Logging, error handling, and debugging
   - Use `core.logger.configure_logging` in stages: console at INFO (single, minimal progress bar from Trainer), files at DEBUG. Live, detailed traces go to `run.log`; stdout/stderr are mirrored to `console.log` via `tee_std_streams`; wrapper saves Docker logs to `container.log`.
   - Wrap critical blocks with `try/except` and call `log_exception_with_locals(logger, msg, exc)` for Rich tracebacks with locals (already used in CLI commands). Always call `finalize_logger` in `finally`.
-  - Run directories are created by `core.run_manager.RunManager` under `logs/log_vXX_.../<stage>/`, with `latest.txt` pointing to the newest stage folder.
+  - Run directories are created by `core.run_manager.RunManager` under `logs/<run-name>/<stage>/`, with `logs/latest.txt` pointing to the newest run root.
   - AWQ runner logging and metadata
     - The AWQ runner writes a `metadata.json` into the conversion output folder and logs to the pipeline's per-stage `run.log`/`console.log`. If conversion fails inside the container the wrapper will capture container logs into `container.log` under the run folder — inspect `logs/latest.txt` then open the `convert-awq` subfolder.
 

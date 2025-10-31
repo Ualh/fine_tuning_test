@@ -39,6 +39,9 @@ services:
       - ./prepared:/app/prepared
       - ./outputs:/app/outputs
       - ./logs:/app/logs
+    labels:
+      org.finetuning.run: "${RUN_NAME:-unset}"
+      org.finetuning.role: "sft"
 
   awq-runner:
     build:
@@ -63,6 +66,9 @@ services:
       - ./prepared:/workspace/prepared
       - ./outputs:/workspace/outputs
       - ./logs:/workspace/logs
+    labels:
+      org.finetuning.run: "${RUN_NAME:-unset}"
+      org.finetuning.role: "awq-runner"
 
   vllm-server:
     image: vllm/vllm-openai:latest
@@ -98,6 +104,9 @@ services:
       - "${SERVED_MODEL_MAX_LEN:-2048}"
     depends_on:
       - sft
+    labels:
+      org.finetuning.run: "${RUN_NAME:-unset}"
+      org.finetuning.role: "vllm-server"
 
   dozzle:
     image: amir20/dozzle:latest
@@ -109,6 +118,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "9999:8080"
+    labels:
+      org.finetuning.run: "${RUN_NAME:-unset}"
+      org.finetuning.role: "monitoring"
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -126,6 +138,9 @@ services:
       - "3000:3000"
     depends_on:
       - vllm-server
+    labels:
+      org.finetuning.run: "${RUN_NAME:-unset}"
+      org.finetuning.role: "open-webui"
 
   tensorboard:
     build:
@@ -149,3 +164,6 @@ services:
       - "6006:6006"
     depends_on:
       - sft
+    labels:
+      org.finetuning.run: "${RUN_NAME:-unset}"
+      org.finetuning.role: "tensorboard"

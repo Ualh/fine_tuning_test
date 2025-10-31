@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 
 from ..core.config import ConfigLoader, PipelineConfig
+from ..core.io_utils import ensure_dir, write_text
 from ..core.logger import (
     configure_logging,
     finalize_logger,
@@ -20,6 +22,7 @@ from ..core.logger import (
     tee_std_streams,
 )
 from ..core.run_manager import RunManager
+from ..core.run_naming import RunNameResult, build_run_name
 from ..core.resume import ResumeManager
 from ..core.ssl import disable_ssl_verification
 from ..data.preprocess import DataPreprocessor
@@ -57,11 +60,79 @@ def _default_preprocess_dir(cfg: PipelineConfig) -> Path:
     return cfg.paths.prepared_dir / f"{dataset_stub}_{size_tag}".replace("-", "_")
 
 
-def _default_output_dir(cfg: PipelineConfig) -> Path:
-    dataset_stub = cfg.preprocess.dataset_name.split("/")[-1] if cfg.preprocess.dataset_name else "dataset"
-    sample_tag = "full" if (cfg.preprocess.sample_size in (None, 0)) else f"n{cfg.preprocess.sample_size}"
-    model_stub = cfg.train.base_model.split("/")[-1] if cfg.train.base_model else "model"
-    return cfg.paths.outputs_dir / f"{dataset_stub}_{sample_tag}_{model_stub}"
+def _default_output_dir(cfg: PipelineConfig, run_info: RunNameResult) -> Path:
+    return cfg.paths.outputs_dir / run_info.name
+
+
+def _ensure_run_dirs(cfg: PipelineConfig, run_info: RunNameResult) -> tuple[Path, Path]:
+    outputs_root = ensure_dir(cfg.paths.outputs_dir / run_info.name)
+    logs_root = ensure_dir(cfg.paths.logs_dir / run_info.name)
+    try:
+        write_text(str(outputs_root), cfg.paths.outputs_dir / "latest.txt")
+        write_text(str(logs_root), cfg.paths.run_metadata_file)
+    except Exception:
+        pass
+    return Path(outputs_root), Path(logs_root)
+
+
+def _compute_run_info(
+    cfg: PipelineConfig,
+    *,
+    run_name: Optional[str] = None,
+    run_index: Optional[int] = None,
+    update_env: bool = True,
+) -> RunNameResult:
+    env_overrides = dict(os.environ)
+    if run_name:
+        env_overrides["RUN_NAME"] = run_name
+    if run_index is not None:
+        env_overrides["FORCE_RUN_INDEX"] = str(run_index)
+
+    run_info = build_run_name(cfg, env=env_overrides)
+    if update_env:
+        os.environ.update(run_info.to_env())
+    return run_info
+
+
+@app.command("run-name-preview")
+def run_name_preview(
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
+    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
+    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
+    format: str = typer.Option("name", "--format", "-f", help="Output format: name, json, or env."),
+) -> None:
+    """Preview the resolved run name without reserving directories."""
+
+    disable_ssl_verification()
+    cfg = _load_config(config)
+    run_info = _compute_run_info(
+        cfg,
+        run_name=run_name,
+        run_index=run_index,
+        update_env=False,
+    )
+
+    fmt = format.lower()
+    if fmt == "name":
+        typer.echo(run_info.name)
+        return
+    if fmt == "json":
+        payload = {
+            "run_name": run_info.name,
+            "run_prefix": run_info.prefix,
+            "run_number": run_info.index,
+            "model_slug": run_info.model_slug,
+            "dataset_slug": run_info.dataset_slug,
+            "size_slug": run_info.size_slug,
+            "legacy": run_info.legacy,
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    if fmt == "env":
+        for key, value in run_info.to_env().items():
+            typer.echo(f"{key}={value}")
+        return
+    raise typer.BadParameter("Unsupported format. Use 'name', 'json', or 'env'.", param_hint="format")
 
 
 @app.command("convert-awq")
@@ -70,6 +141,8 @@ def convert_awq(
     merged_dir: Optional[Path] = typer.Option(None, help="Merged model directory (defaults to outputs/*/merged)."),
     output_dir: Optional[Path] = typer.Option(None, help="Where to store compressed model output."),
     force: bool = typer.Option(False, help="Overwrite existing output if present."),
+    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
+    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
 ) -> None:
     """Run AWQ conversion using the isolated `awq-runner` sidecar (preferred) or locally.
 
@@ -81,8 +154,11 @@ def convert_awq(
     disable_ssl_verification()
     cfg = _load_config(config)
 
-    run_manager = RunManager(cfg.paths.logs_dir, cfg.paths.run_metadata_file)
-    run_dir = run_manager.create_run_dir("convert-awq")
+    run_info = _compute_run_info(cfg, run_name=run_name, run_index=run_index)
+    outputs_root, _ = _ensure_run_dirs(cfg, run_info)
+
+    run_manager = RunManager(cfg, run_info=run_info)
+    _, run_dir = run_manager.create_run_dir("convert-awq")
     logger = configure_logging(
         name="convert-awq",
         log_dir=run_dir,
@@ -90,8 +166,8 @@ def convert_awq(
         file_level=_level_to_int(cfg.logging.file_level),
     )
 
-    merged_resolved = Path(merged_dir or (_default_output_dir(cfg) / "merged"))
-    out_resolved = Path(output_dir or (_default_output_dir(cfg) / "merged_awq"))
+    merged_resolved = Path(merged_dir or (outputs_root / "merged"))
+    out_resolved = Path(output_dir or (outputs_root / "merged_awq"))
 
     # Check config AWQ block (loader supports legacy `llm_compressor` key)
     awq_cfg = getattr(cfg, "awq_conversion", None)
@@ -213,6 +289,8 @@ def preprocess_sft(
     pack_sequences: Optional[bool] = typer.Option(None, help="Enable sequence packing."),
     output: Optional[Path] = typer.Option(None, help="Output directory for prepared splits."),
     resume_from: Optional[Path] = typer.Option(None, help="Reuse an existing prepared directory."),
+    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
+    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
 ) -> None:
     # Debug: bypass SSL verification to unblock HF downloads in restricted envs
     disable_ssl_verification()
@@ -234,8 +312,11 @@ def preprocess_sft(
     if pack_sequences is not None:
         cfg.preprocess.pack_sequences = pack_sequences
 
-    run_manager = RunManager(cfg.paths.logs_dir, cfg.paths.run_metadata_file)
-    run_dir = run_manager.create_run_dir("preprocess")
+    run_info = _compute_run_info(cfg, run_name=run_name, run_index=run_index)
+    _ensure_run_dirs(cfg, run_info)
+
+    run_manager = RunManager(cfg, run_info=run_info)
+    _, run_dir = run_manager.create_run_dir("preprocess")
     logger = configure_logging(
         name="preprocess",
         log_dir=run_dir,
@@ -292,6 +373,8 @@ def finetune_sft(
     logging_steps: Optional[int] = typer.Option(None),
     eval_steps: Optional[int] = typer.Option(None),
     resume_from: Optional[Path] = typer.Option(None, help="Resume trainer state."),
+    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
+    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
 ) -> None:
     # Debug: bypass SSL verification to unblock HF downloads in restricted envs
     disable_ssl_verification()
@@ -335,8 +418,11 @@ def finetune_sft(
     if eval_steps is not None:
         cfg.train.eval_steps = eval_steps
 
-    run_manager = RunManager(cfg.paths.logs_dir, cfg.paths.run_metadata_file)
-    run_dir = run_manager.create_run_dir("train")
+    run_info = _compute_run_info(cfg, run_name=run_name, run_index=run_index)
+    outputs_root, _ = _ensure_run_dirs(cfg, run_info)
+
+    run_manager = RunManager(cfg, run_info=run_info)
+    _, run_dir = run_manager.create_run_dir("train")
     logger = configure_logging(
         name="train",
         log_dir=run_dir,
@@ -344,7 +430,7 @@ def finetune_sft(
         file_level=_level_to_int(cfg.logging.file_level),
     )
 
-    output_resolved = Path(output_dir or _default_output_dir(cfg))
+    output_resolved = Path(output_dir or outputs_root)
     data_resolved = Path(data_dir or _default_preprocess_dir(cfg))
     resume_mgr = ResumeManager(logger)
     resume_path = resume_mgr.resolve(str(resume_from) if resume_from else None, output_resolved)
@@ -375,6 +461,9 @@ def export_merged(
     adapter_dir: Optional[Path] = typer.Option(None, help="Directory with LoRA adapter."),
     output_dir: Optional[Path] = typer.Option(None, help="Where to place merged model."),
     base_model: Optional[str] = typer.Option(None, help="Base model name."),
+    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
+    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
+    use_latest_adapter: bool = typer.Option(False, help="If adapter is missing, automatically pick the most recent adapter from outputs/*/adapter."),
 ) -> None:
     # Debug: bypass SSL verification to unblock HF downloads in restricted envs
     disable_ssl_verification()
@@ -382,8 +471,11 @@ def export_merged(
     if base_model:
         cfg.train.base_model = base_model
 
-    run_manager = RunManager(cfg.paths.logs_dir, cfg.paths.run_metadata_file)
-    run_dir = run_manager.create_run_dir("export")
+    run_info = _compute_run_info(cfg, run_name=run_name, run_index=run_index)
+    outputs_root, _ = _ensure_run_dirs(cfg, run_info)
+
+    run_manager = RunManager(cfg, run_info=run_info)
+    _, run_dir = run_manager.create_run_dir("export")
     logger = configure_logging(
         name="export",
         log_dir=run_dir,
@@ -391,8 +483,8 @@ def export_merged(
         file_level=_level_to_int(cfg.logging.file_level),
     )
 
-    adapter_resolved = Path(adapter_dir or (_default_output_dir(cfg) / "adapter"))
-    output_resolved = Path(output_dir or (_default_output_dir(cfg) / "merged"))
+    adapter_resolved = Path(adapter_dir or (outputs_root / "adapter"))
+    output_resolved = Path(output_dir or (outputs_root / "merged"))
     merger = LoraMerger(cfg.train.base_model, logger)
     console_log = run_dir / "console.log"
     try:
@@ -404,6 +496,32 @@ def export_merged(
                     adapter_resolved,
                     output_resolved,
                 )
+                # If the adapter doesn't exist at the expected location, offer
+                # a helpful fallback: optionally pick the most-recent adapter
+                # found under `outputs/*/adapter` when the user passed
+                # --use-latest-adapter. Otherwise raise a clear error listing
+                # available candidates.
+                if not adapter_resolved.exists():
+                    candidates = list(cfg.paths.outputs_dir.glob("*/adapter"))
+                    if not candidates:
+                        raise FileNotFoundError(
+                            f"Adapter directory not found: {adapter_resolved}\nNo adapters found under {cfg.paths.outputs_dir}.\nRun finetune-sft first or pass --adapter-dir to point to an existing adapter."
+                        )
+                    if not use_latest_adapter:
+                        # List candidates to help the user pick the right one
+                        pretty = "\n".join([str(p.parent) for p in candidates])
+                        raise FileNotFoundError(
+                            f"Adapter directory not found: {adapter_resolved}\nFound the following adapter candidates:\n{pretty}\n\nTo automatically use the most-recent adapter, re-run with --use-latest-adapter.\nOr pass --adapter-dir to explicitly select one."
+                        )
+                    # use the most recently modified adapter
+                    candidates_sorted = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+                    chosen = candidates_sorted[0]
+                    logger.info("--use-latest-adapter: selecting adapter from %s", chosen.parent)
+                    adapter_resolved = chosen
+                    # default output_resolved to the chosen run's merged dir if not explicitly passed
+                    if output_dir is None:
+                        output_resolved = chosen.parent / "merged"
+
                 summary = merger.run(adapter_dir=adapter_resolved, output_dir=output_resolved)
                 logger.info("Merge summary: %s", summary)
             except Exception as exc:
@@ -423,6 +541,8 @@ def eval_sft(
     output_dir: Optional[Path] = typer.Option(None, help="Where to store evaluation outputs."),
     cutoff_len: Optional[int] = typer.Option(None, help="Override sequence length for context."),
     val_path: Optional[Path] = typer.Option(None, help="Optional validation jsonl for perplexity."),
+    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
+    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
 ) -> None:
     # Debug: bypass SSL verification to unblock HF downloads in restricted envs
     disable_ssl_verification()
@@ -430,8 +550,11 @@ def eval_sft(
     if cutoff_len is not None:
         cfg.eval.cutoff_len = cutoff_len
 
-    run_manager = RunManager(cfg.paths.logs_dir, cfg.paths.run_metadata_file)
-    run_dir = run_manager.create_run_dir("eval")
+    run_info = _compute_run_info(cfg, run_name=run_name, run_index=run_index)
+    outputs_root, _ = _ensure_run_dirs(cfg, run_info)
+
+    run_manager = RunManager(cfg, run_info=run_info)
+    _, run_dir = run_manager.create_run_dir("eval")
     logger = configure_logging(
         name="eval",
         log_dir=run_dir,
@@ -439,8 +562,8 @@ def eval_sft(
         file_level=_level_to_int(cfg.logging.file_level),
     )
 
-    model_resolved = Path(model_dir or (_default_output_dir(cfg) / "merged"))
-    output_resolved = Path(output_dir or (_default_output_dir(cfg) / "eval"))
+    model_resolved = Path(model_dir or (outputs_root / "merged"))
+    output_resolved = Path(output_dir or (outputs_root / "eval"))
     evaluator = Evaluator(cfg.eval, logger)
     console_log = run_dir / "console.log"
     try:
@@ -476,35 +599,37 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         raise typer.BadParameter("serve.served_model_name must be set in config.yaml.")
 
     project_root = cfg.project_root
-    dataset_stub = cfg.preprocess.dataset_name.split("/")[-1]
-    model_stub = (cfg.train.base_model.split("/")[-1] or cfg.train.base_model)
+    run_info = _compute_run_info(cfg)
+    outputs_root, logs_root = _ensure_run_dirs(cfg, run_info)
 
-    dataset_slug = _slugify(dataset_stub, fallback="dataset", max_length=20)
-    model_slug = _slugify(model_stub, fallback="model", max_length=24)
-    sample_slug = "full" if sample_size is None else _slugify(f"n{sample_size}", fallback="nfull", max_length=18)
-
-    compose_project = f"ft-{dataset_slug}-{sample_slug}-{model_slug}"
-    compose_project = compose_project.lower()
+    # Use a stable compose project name so docker compose containers/images are
+    # not recreated per run. Prefer the repository folder name (project root)
+    # which is stable across runs. This prevents image/container proliferation
+    # when launching multiple runs.
+    host_compose = os.environ.get("HOST_COMPOSE_PROJECT")
+    if host_compose:
+        compose_project = str(host_compose).lower()
+    else:
+        compose_project = cfg.project_root.name.lower() if cfg.project_root and cfg.project_root.name else "pipeline"
     if len(compose_project) > 62:
         compose_project = compose_project[:62].rstrip("-")
     if not compose_project:
-        compose_project = "ft"
+        compose_project = "pipeline"
     if not compose_project[0].isalpha():
-        compose_project = f"ft-{compose_project}"
-        compose_project = compose_project[:62].rstrip("-") or "ft"
+        compose_project = f"proj-{compose_project}"
+        compose_project = compose_project[:62].rstrip("-") or "pipeline"
 
     preprocess_dir = _default_preprocess_dir(cfg)
-    output_dir = _default_output_dir(cfg)
-    adapter_dir = output_dir / "adapter"
-    merged_dir = output_dir / "merged"
-    eval_dir = output_dir / "eval"
+    adapter_dir = outputs_root / "adapter"
+    merged_dir = outputs_root / "merged"
+    eval_dir = outputs_root / "eval"
 
     preprocess_rel = _rel_to_project(preprocess_dir, project_root, label="Preprocess output directory")
-    output_rel = _rel_to_project(output_dir, project_root, label="Training output directory")
+    output_rel = _rel_to_project(outputs_root, project_root, label="Training output directory")
     adapter_rel = _rel_to_project(adapter_dir, project_root, label="Adapter directory")
     merged_rel = _rel_to_project(merged_dir, project_root, label="Merged directory")
     eval_rel = _rel_to_project(eval_dir, project_root, label="Evaluation directory")
-    logs_rel = _rel_to_project(cfg.paths.logs_dir, project_root, label="Logs directory")
+    logs_rel = _rel_to_project(logs_root, project_root, label="Logs directory")
 
     # Determine the served model relative path. If the config value is falsy
     # or explicitly set to the string "none" (case-insensitive), use the
@@ -520,7 +645,7 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         "PROJECT_ROOT": str(project_root),
         "COMPOSE_PROJECT": compose_project,
         "DATASET_NAME": cfg.preprocess.dataset_name,
-    "DATASET_SAMPLE_SIZE": "full" if sample_size is None else str(sample_size),
+        "DATASET_SAMPLE_SIZE": "full" if sample_size is None else str(sample_size),
         "BASE_MODEL_NAME": cfg.train.base_model,
         "PREPROCESS_DIR": preprocess_rel.as_posix(),
         "PREPROCESS_DIR_CONTAINER": f"/app/{preprocess_rel.as_posix()}",
@@ -540,11 +665,20 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         "DEBUG_PIPELINE": "1" if cfg.logging.debug_pipeline else "0",
         "TENSORBOARD_LOGDIR": logs_rel.as_posix(),
         "TENSORBOARD_LOGDIR_CONTAINER": f"/app/{logs_rel.as_posix()}",
+    # Indicate whether training reports to tensorboard (so wrapper can
+    # automatically start the tensorboard service when requested).
+    "TENSORBOARD_ENABLED": "1" if ("tensorboard" in (cfg.train.report_to or [])) else "0",
         # AWQ / llm-compressor runtime hints for wrapper scripts
         "AWQ_ENABLED": "1" if (cfg.awq_conversion and cfg.awq_conversion.enabled) else "0",
         "AWQ_GPU_ENABLED": "1" if (cfg.awq_conversion and cfg.awq_conversion.gpu_enabled) else "0",
         "AWQ_OUTPUT_SUFFIX": (cfg.awq_conversion.output_suffix if (cfg.awq_conversion and cfg.awq_conversion.output_suffix) else "awq"),
+        "RUN_OUTPUTS_DIR": output_rel.as_posix(),
+        "RUN_OUTPUTS_DIR_CONTAINER": f"/app/{output_rel.as_posix()}",
+        "RUN_LOGS_DIR": logs_rel.as_posix(),
+        "RUN_LOGS_DIR_CONTAINER": f"/app/{logs_rel.as_posix()}",
+        "RUN_DIR_NAME": run_info.name,
     }
+    runtime.update(run_info.to_env())
     return runtime
 
 

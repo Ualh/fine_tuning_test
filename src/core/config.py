@@ -106,6 +106,20 @@ class LoggingConfig:
 
 
 @dataclass
+class NamingConfig:
+    """Settings controlling canonical run naming."""
+
+    normalize: bool = True
+    separator: str = "-"
+    run_counter_scope: str = "model_dataset"
+    run_prefix: str = ""
+    legacy_allowed: bool = True
+    max_segment_length: int = 64
+    max_name_length: int = 128
+    use_legacy: bool = False
+
+
+@dataclass
 class AwqConversionConfig:
     """Configuration for AWQ / llm-compressor conversion.
 
@@ -136,6 +150,7 @@ class PipelineConfig:
     eval: EvalConfig
     serve: ServeConfig
     logging: LoggingConfig
+    naming: NamingConfig
     awq_conversion: Optional["AwqConversionConfig"]
     project_root: Path
 
@@ -163,6 +178,7 @@ class ConfigLoader:
             eval=self._parse_eval(),
             serve=self._parse_serve(),
             logging=self._parse_logging(),
+            naming=self._parse_naming(),
             awq_conversion=self._parse_awq_conversion(),
             project_root=self.project_root,
         )
@@ -294,6 +310,44 @@ class ConfigLoader:
             file_level=str(data.get("file_level", "DEBUG")),
             tqdm_refresh_rate=float(data.get("tqdm_refresh_rate", 1.0)),
             debug_pipeline=bool(self._to_bool(data.get("debug_pipeline", False))),
+        )
+
+    def _parse_naming(self) -> NamingConfig:
+        data = self.raw.get("naming", {}) or {}
+
+        separator = str(data.get("separator", "-") or "-")
+        if len(separator) != 1:
+            raise PipelineConfigError(
+                "naming.separator must be a single character to avoid ambiguous slugs"
+            )
+
+        scope = str(data.get("run_counter_scope", "model_dataset")).strip().lower()
+        allowed_scopes = {"global", "model", "model_dataset"}
+        if scope not in allowed_scopes:
+            raise PipelineConfigError(
+                f"naming.run_counter_scope must be one of {sorted(allowed_scopes)}, got: {scope}"
+            )
+
+        max_segment_length = int(data.get("max_segment_length", 64))
+        max_name_length = int(data.get("max_name_length", 128))
+        if max_segment_length <= 0:
+            raise PipelineConfigError("naming.max_segment_length must be positive")
+        if max_name_length <= 0:
+            raise PipelineConfigError("naming.max_name_length must be positive")
+        if max_name_length < max_segment_length:
+            raise PipelineConfigError(
+                "naming.max_name_length must be greater than or equal to naming.max_segment_length"
+            )
+
+        return NamingConfig(
+            normalize=bool(self._to_bool(data.get("normalize", True))),
+            separator=separator,
+            run_counter_scope=scope,
+            run_prefix=str(data.get("run_prefix", "")),
+            legacy_allowed=bool(self._to_bool(data.get("legacy_allowed", True))),
+            max_segment_length=max_segment_length,
+            max_name_length=max_name_length,
+            use_legacy=bool(self._to_bool(data.get("use_legacy", False))),
         )
 
     def _parse_awq_conversion(self) -> AwqConversionConfig:

@@ -88,6 +88,7 @@ if /I "%TARGET%"=="convert-awq"   goto :convert_awq
 if /I "%TARGET%"=="tensorboard-up" goto :tensorboard_up
 if /I "%TARGET%"=="tensorboard-down" goto :tensorboard_down
 if /I "%TARGET%"=="tensorboard-logs" goto :tensorboard_logs
+if /I "%TARGET%"=="run-name-preview" goto :run_name_preview
 if /I "%TARGET%"=="show-last"      goto :showlast
 if /I "%TARGET%"=="clean"           goto :clean
 if /I "%TARGET%"=="prune"           goto :clean
@@ -99,11 +100,8 @@ REM ============================= Commands =====================================
 REM ============================================================================
 :build
 REM Build should not require runtime metadata; call docker compose directly
-if "%DEBUG_PIPELINE%"=="1" (
-    docker compose build
-) else (
-    docker compose build --quiet
-)
+REM Always show build output (disable quiet mode so users see progress and errors)
+docker compose build
 goto :eof
 
 :up
@@ -133,7 +131,7 @@ set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main preprocess-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
     call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
-call :compose exec %SERVICE% bash -lc "%CMD%"
+call :compose exec %SERVICE% bash -lc "!RUN_ENV_EXPORT!%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs preprocess
 goto :eof
@@ -144,12 +142,21 @@ if errorlevel 1 goto :eof
 if defined PREPROCESS_DIR_CONTAINER echo [FINETUNE] data=!PREPROCESS_DIR_CONTAINER!
 if defined OUTPUT_DIR_CONTAINER echo [FINETUNE] output=!OUTPUT_DIR_CONTAINER!
 if defined TENSORBOARD_LOGDIR echo [FINETUNE] TensorBoard=http://localhost:6006 (logdir=!TENSORBOARD_LOGDIR!)
+REM If training requests tensorboard, ensure the service is up so users can
+REM view metrics during the run. The runtime probe sets TENSORBOARD_ENABLED=1
+REM when `tensorboard` is in `train.report_to`.
+if "%TENSORBOARD_ENABLED%"=="1" (
+    echo [TENSORBOARD] Config requests TensorBoard; ensuring service is running
+    echo [TENSORBOARD] Ensuring tensorboard image is built
+    call :compose build tensorboard
+    call :compose up -d tensorboard
+)
 set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main finetune-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
     call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
-call :compose exec %SERVICE% bash -lc "%CMD%"
+call :compose exec %SERVICE% bash -lc "!RUN_ENV_EXPORT!%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs finetune
 goto :eof
@@ -163,7 +170,7 @@ set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main export-merged --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
     call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
-call :compose exec %SERVICE% bash -lc "%CMD%"
+call :compose exec %SERVICE% bash -lc "!RUN_ENV_EXPORT!%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs export
 :: Post-export: Optionally run AWQ conversion using the isolated awq-runner
@@ -182,12 +189,12 @@ if "%RUN_AWQ%"=="1" (
     if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
     set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
     set "CONFIG_POSIX=%CONFIG_POSIX%"
-    set "RUNNER_CMD=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
+    set "RUNNER_BASE=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
     if defined FORCE_AWQ (
-        set "RUNNER_CMD=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL! --force"
+        set "RUNNER_BASE=!RUNNER_BASE! --force"
     )
-    echo [CMD] !RUNNER_CMD!
-    call :compose run --rm --no-deps --entrypoint "" -T awq-runner !RUNNER_CMD!
+    echo [CMD] !RUNNER_BASE!
+    call :compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!RUNNER_BASE!"
     set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
     call :capture_container_logs convert-awq
 )
@@ -208,12 +215,12 @@ if "%RUN_AWQ%"=="1" (
     if not defined MERGED_DIR (echo [ERROR] MERGED_DIR not set in runtime; cannot run AWQ & exit /b 2)
     if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
     set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
-    set "CMD=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
+    set "CMD_BASE=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
     if defined FORCE_AWQ (
-        set "CMD=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL! --force"
+        set "CMD_BASE=!CMD_BASE! --force"
     )
-    echo [CMD] !CMD!
-    call :compose run --rm --no-deps --entrypoint "" -T awq-runner !CMD!
+    echo [CMD] !CMD_BASE!
+    call :compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!CMD_BASE!"
     set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
     call :capture_container_logs convert-awq
 ) else (
@@ -249,6 +256,23 @@ echo [TENSORBOARD] Streaming container logs (Ctrl+C to stop)
 call :compose logs -f tensorboard
 goto :eof
 
+:run_name_preview
+call :build_naming_export
+set "CONFIG_POSIX=%CONFIG%"
+set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
+if "%DEBUG_PIPELINE%"=="1" echo [PREVIEW] resolving run name via container
+docker compose run --rm --no-deps -e "HOST_COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%" -T %SERVICE% bash -lc "!NAMING_EXPORT!python3 -m src.cli.main run-name-preview --config '%CONFIG_POSIX%'"
+set "STATUS=%ERRORLEVEL%"
+if %STATUS% EQU 0 goto :preview_done
+echo [WARN] Container preview failed (%STATUS%). Falling back to local Python...
+python -m src.cli.main run-name-preview --config "%CONFIG%"
+set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
+goto :eof
+
+:preview_done
+set "PIPELINE_EXIT_CODE=0"
+goto :eof
+
 :evaluate
 call :ensure_runtime
 if errorlevel 1 goto :eof
@@ -259,7 +283,7 @@ set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 set "CMD=python3 -m src.cli.main eval-sft --config '%CONFIG_POSIX%'"
 echo [CMD] %CMD%
 call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
-call :compose exec %SERVICE% bash -lc "%CMD%"
+call :compose exec %SERVICE% bash -lc "!RUN_ENV_EXPORT!%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs eval
 goto :eof
@@ -314,6 +338,7 @@ if errorlevel 1 exit /b %ERRORLEVEL%
 set "RUNTIME_LOADED=1"
 echo [RUNTIME] COMPOSE_PROJECT=%COMPOSE_PROJECT%
 if defined DATASET_NAME echo [RUNTIME] dataset=%DATASET_NAME% sample=%DATASET_SAMPLE_SIZE% base=%BASE_MODEL_NAME%
+if defined RUN_NAME echo [RUNTIME] run=!RUN_NAME! (#%RUN_NUMBER%)
 if "%DEBUG_PIPELINE%"=="1" echo [RUNTIME] debug pipeline mode enabled
 :: Set compose flags depending on debug pipeline setting. When debug is off we
 :: avoid triggering image rebuilds during `docker compose up` to suppress
@@ -322,6 +347,22 @@ if "%DEBUG_PIPELINE%"=="1" (
     set "COMPOSE_NO_BUILD_FLAG="
 ) else (
     set "COMPOSE_NO_BUILD_FLAG=--no-build"
+)
+
+set "RUN_ENV_EXPORT="
+if defined RUN_NAME set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_NAME='!RUN_NAME!'"
+if defined RUN_NUMBER set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_NUMBER='!RUN_NUMBER!'"
+if defined RUN_NAME_PREFIX set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_NAME_PREFIX='!RUN_NAME_PREFIX!'"
+if defined RUN_MODEL_SLUG set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_MODEL_SLUG='!RUN_MODEL_SLUG!'"
+if defined RUN_DATASET_SLUG set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_DATASET_SLUG='!RUN_DATASET_SLUG!'"
+if defined RUN_SIZE_SLUG set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_SIZE_SLUG='!RUN_SIZE_SLUG!'"
+if defined RUN_OUTPUTS_DIR set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_OUTPUTS_DIR='!RUN_OUTPUTS_DIR!'"
+if defined RUN_LOGS_DIR set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_LOGS_DIR='!RUN_LOGS_DIR!'"
+if defined RUN_OUTPUTS_DIR_CONTAINER set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_OUTPUTS_DIR_CONTAINER='!RUN_OUTPUTS_DIR_CONTAINER!'"
+if defined RUN_LOGS_DIR_CONTAINER set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_LOGS_DIR_CONTAINER='!RUN_LOGS_DIR_CONTAINER!'"
+if defined RUN_DIR_NAME set "RUN_ENV_EXPORT=!RUN_ENV_EXPORT! RUN_DIR_NAME='!RUN_DIR_NAME!'"
+if defined RUN_ENV_EXPORT (
+    set "RUN_ENV_EXPORT=export!RUN_ENV_EXPORT! && "
 )
 goto :eof
 
@@ -334,8 +375,9 @@ set "RUNTIME_FILE=%TEMP%\pipeline_runtime_%RANDOM%_%RANDOM%.env"
 set "RUNTIME_RAW=%TEMP%\pipeline_runtime_%RANDOM%_%RANDOM%.raw"
 set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
+call :build_naming_export
 if "%DEBUG_PIPELINE%"=="1" echo [TRACE] invoking docker runtime probe for config=%CONFIG_POSIX%
-docker compose run --rm --no-deps -T %SERVICE% bash -lc "python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env" >"%RUNTIME_RAW%"
+docker compose run --rm --no-deps -e "HOST_COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%" -T %SERVICE% bash -lc "!NAMING_EXPORT!python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env" >"%RUNTIME_RAW%"
 set "STATUS=%ERRORLEVEL%"
 if "%DEBUG_PIPELINE%"=="1" echo [TRACE] docker probe exit status=%STATUS%
 if %STATUS% EQU 0 goto :runtime_filter
@@ -369,6 +411,26 @@ exit /b 0
 if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
 if exist "%RUNTIME_RAW%" del "%RUNTIME_RAW%" >nul 2>&1
 exit /b %STATUS%
+
+:build_naming_export
+set "NAMING_EXPORT="
+REM Derive a stable host project name to export so in-container probes return
+REM the same compose project as the host. If the caller already set
+REM HOST_COMPOSE_PROJECT, keep it; otherwise derive it from the script dir.
+if not defined HOST_COMPOSE_PROJECT (
+    for %%I in ("%_SCRIPT_DIR%") do (
+        set "HOST_COMPOSE_PROJECT=%%~nI"
+    )
+)
+for %%V in (RUN_NAME FORCE_RUN_NAME RUN_INDEX FORCE_RUN_INDEX LEGACY_RUN_NAME USE_LEGACY_NAMING) do (
+    if defined %%V (
+        set "NAMING_EXPORT=!NAMING_EXPORT! %%V='!%%V!'"
+    )
+)
+if defined NAMING_EXPORT (
+    set "NAMING_EXPORT=export!NAMING_EXPORT! && "
+)
+exit /b 0
 
 :compose
 if defined COMPOSE_PROJECT (

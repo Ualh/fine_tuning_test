@@ -113,7 +113,7 @@ services:
     .\run_pipeline.bat down
     ```
 
-    Logs are under `logs/log_vXX_.../<stage>/` and the latest path is stored in `logs/latest.txt`.
+  Logs are stored under `logs/<run-name>/<stage>/` and the latest run root is tracked in `logs/latest.txt`.
 
     Logging behaviour
 
