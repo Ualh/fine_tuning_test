@@ -115,4 +115,4 @@ Write docstrings and comments as if explaining the module to a new contributor w
   - Keep docstrings compact and actionable — a newcomer should know where to look next (tests, CLI entrypoint, or run logs).
 
 - Logging and diagnostics
-  - Prefer `logger` instances (passed into modules) over `print()` for library code. Log key runtime values at INFO and detailed internals at DEBUG. Mirror stdout to `console.log` via `core.logger.tee_std_streams` when running CLI stages.
+  - Prefer `logger` instances (passed into modules) over `print()` for library code. Log key runtime values at INFO and detailed internals at DEBUG. Mirror stdout to `console.log` via `core.logger

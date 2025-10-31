@@ -144,9 +144,31 @@
 - [x] Add tests/test_tensorboard_logging.py to assert a per-run tensorboard/ folder and events file after a minimal finetune
 - [x] Add .gitignore entries for tensorboard output and run format/type checks
 
-# v6
+# v6 training debugging TypeError while constructing TrainingArguments in sft_trainer.py
+
+- [x] Reproduce the TypeError locally using a minimal debug run.
+- [x] Patch `sft_trainer.py` to only pass supported kwargs to `TrainingArguments`.
+- [x] Use `inspect.signature` to check if `logging_dir` is supported before passing it.
+- [x] Add a unit test to ensure `TrainingArguments` construction doesn’t raise `TypeError`.
+- [x] Run `test_tensorboard_logging.py` to verify logging behavior.
+    - [x] debug
+- [x] Run `test_pipeline_smoke.py` to verify pipeline integrity.
+ - [x] Run a short finetune using `debug_config.yaml` inside the container.  
+     (Run completed; short debug finetune finished successfully.)
+ - [x] Confirm training starts and logs progress past `TrainingArguments` creation.  
+     (Logs show "TensorBoard logging enabled" and the compatibility info message.)
+ - [x] Confirm TensorBoard events are written to the correct directory.  
+     (Event files were written by Trainer under `outputs/<run>/trainer_state/runs/...` — note: `logging_dir` was skipped by TrainingArguments in this runtime, so the Trainer wrote events to its default `trainer_state/runs` location instead of `logs/<run>/train/tensorboard`.)
+ - [x] Add an info-level log if `logging_dir` is skipped due to signature mismatch.  
+     (Implemented: `sft_trainer.py` logs an INFO when `logging_dir` is not accepted by `TrainingArguments`.)
+- [x] Add a small TrainerCallback (or a simple tensorboard SummaryWriter) that always writes metrics to your canonical tensorboard_dir regardless of whether TrainingArguments accepted logging_dir. 
+
+# v7
 - [ ] Execute `run_pipeline.bat finetune-sft RESUME_FROM=latest` for resume validation
 - [ ] Execute `run_pipeline.bat export-merged RESUME_FROM=latest` (idempotence check)
 - [ ] Execute `run_pipeline.bat eval-sft`
 - [ ] Execute `run_pipeline.bat serve-vllm`
 - [ ] Capture & document any fixes/tests for encountered issues
+
+# v7 small fixes
+- [ ] `torch_dtype` is deprecated! Use `dtype` instead!

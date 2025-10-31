@@ -16,6 +16,11 @@ from datasets import Dataset, DatasetDict, Features, Value
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
 from transformers import TrainerCallback
+try:
+    # Prefer torch's SummaryWriter when available (bundles tensorboard support)
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
 from transformers.trainer_callback import ProgressCallback, PrinterCallback
 from huggingface_hub import login as hf_login
 from trl import SFTTrainer
@@ -179,7 +184,11 @@ class SFTTrainerRunner:
             except Exception:
                 pass
 
-        training_args = TrainingArguments(
+        # Build TrainingArguments kwargs defensively to remain compatible with
+        # multiple Transformers versions. Some releases don't accept
+        # `logging_dir` in the constructor, so inspect the signature and only
+        # pass supported kwargs.
+        training_kwargs = dict(
             output_dir=str(output_dir / "trainer_state"),
             num_train_epochs=self.config.epochs,
             per_device_train_batch_size=self.config.batch_size,
@@ -199,8 +208,23 @@ class SFTTrainerRunner:
             gradient_checkpointing=self.config.gradient_checkpointing,
             max_steps=self.config.max_steps if self.config.max_steps else -1,
             report_to=report_to,
-            logging_dir=str(tensorboard_dir),
         )
+
+        try:
+            sig = inspect.signature(TrainingArguments.__init__)
+            if "logging_dir" in sig.parameters:
+                training_kwargs["logging_dir"] = str(tensorboard_dir)
+            else:
+                try:
+                    self.logger.info("TrainingArguments does not accept 'logging_dir'; skipping it for compatibility.")
+                except Exception:
+                    pass
+        except Exception:
+            # If signature inspection fails for any reason, attempt to pass
+            # logging_dir but catch the TypeError on construction below.
+            training_kwargs["logging_dir"] = str(tensorboard_dir)
+
+        training_args = TrainingArguments(**training_kwargs)
 
         # Small callback to capture Trainer/TRL logging events (metrics)
 
@@ -226,6 +250,59 @@ class SFTTrainerRunner:
                     except Exception:
                         self._logger.info("TRAIN_METRICS: %s", logs)
 
+        # Optional callback that writes metrics into a TensorBoard SummaryWriter
+        class TensorBoardWriterCallback(TrainerCallback):
+            """Write trainer metrics into a SummaryWriter pointing at the
+            canonical `tensorboard_dir`. This ensures events are written to
+            our expected logs path regardless of whether TrainingArguments
+            accepted the `logging_dir` kwarg.
+            """
+
+            def __init__(self, writer):
+                self._writer = writer
+
+            def on_log(self, args, state, control, **kwargs):
+                logs = kwargs.get("logs") or kwargs.get("metrics") or None
+                if not isinstance(logs, dict) or self._writer is None:
+                    return
+                step = getattr(state, "global_step", None)
+                try:
+                    for k, v in logs.items():
+                        try:
+                            # only numeric scalars
+                            self._writer.add_scalar(k, float(v), step)
+                        except Exception:
+                            # ignore non-scalar metrics
+                            pass
+                    self._writer.flush()
+                except Exception:
+                    # Avoid raising from callbacks
+                    pass
+
+            def on_train_end(self, args, state, control, **kwargs):
+                try:
+                    self._writer.flush()
+                    self._writer.close()
+                except Exception:
+                    pass
+
+        # Build callbacks list and optionally add a TensorBoard writer so we
+        # always write events to our canonical `tensorboard_dir` independent
+        # of TrainingArguments constructor support.
+        callbacks = [MetricLoggerCallback(self.logger)]
+        tb_writer = None
+        if report_to and "tensorboard" in [item.lower() for item in report_to]:
+            if SummaryWriter is not None:
+                try:
+                    tb_writer = SummaryWriter(log_dir=str(tensorboard_dir))
+                    callbacks.append(TensorBoardWriterCallback(tb_writer))
+                except Exception:
+                    # If SummaryWriter fails, fall back to no-op but don't stop training
+                    try:
+                        self.logger.warning("Failed to create SummaryWriter for %s", tensorboard_dir)
+                    except Exception:
+                        pass
+
         trainer = SFTTrainer(
             model=model,
             tokenizer=tokenizer,
@@ -236,7 +313,7 @@ class SFTTrainerRunner:
             max_seq_length=self.config.cutoff_len,
             packing=self.preprocess_config.pack_sequences,
             peft_config=peft_config,
-            callbacks=[MetricLoggerCallback(self.logger)],
+            callbacks=callbacks,
         )
 
         # Replace the default progress callback with stage-aware labels and drop printer spam.
