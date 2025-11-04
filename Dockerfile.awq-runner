@@ -28,8 +28,7 @@ RUN apt-get update \
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir llmcompressor==${LLMCOMPRESSOR_VERSION} PyYAML
 
-COPY src/training /workspace/scripts
-RUN chmod +x /workspace/scripts/*.py || true
+COPY src /workspace/src
 
 ########## GPU stage (target: gpu) ##########
 FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04 AS gpu
@@ -55,5 +54,4 @@ RUN apt-get update \
 RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
     && pip3 install --no-cache-dir llmcompressor==${LLMCOMPRESSOR_VERSION} PyYAML
 
-COPY src/training /workspace/scripts
-RUN chmod +x /workspace/scripts/*.py || true
+COPY src /workspace/src

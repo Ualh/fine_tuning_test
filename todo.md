@@ -51,7 +51,7 @@
     - [x] update `Dockerfile.llc-runner` to `Dockerfile.awq-runner` with `AWQ_GPU` build arg.
     - [x] Use CUDA base image if GPU enabled; otherwise use slim Python.
     - [x] Install `llmcompressor`, `PyYAML`, and optional modifiers.
-    ### 2. Implement `scripts/awq_runner.py`
+    ### 2. Implement `src/training/awq_runner.py`
     - [x] Parse CLI args: `--config`, `--merged`, `--out`, `--force`, `--gpu/--cpu`.
     - [x] Load config and validate AWQ section.
     - [x] Call `llmcompressor.oneshot(...)` and capture stdout/stderr.
@@ -222,22 +222,23 @@
     - [x] Noted AWQ used only 20 calibration samples vs. requested 128 (recorded in metadata); may impact quantization quality
 
 # v8 docs update
-- [ ] update docs with anything that is outdated or non-consistent
-    - [ ] update README.md
-    - [ ] update docs/1.setup.md
-    - [ ] update docs/2.preprocess-sft.md
-    - [ ] update docs/3.finetune-sft.md
-    - [ ] update docs/4.export-merged.md
-    - [ ] update docs/5.awq-compression.md
-    - [ ] update docs/6.eval-sft.md
-    - [ ] update docs/7.serve-vllm.md
-    - [ ] update docs/8.tensorboard.md
-    - [ ] update guide.md
+- [x] update docs with anything that is outdated or non-consistent
+    - [x] update copilot-instructions.md
+    - [x] update README.md
+    - [x] update docs/1.setup.md
+    - [x] update docs/2.preprocess-sft.md
+    - [x] update docs/3.finetune-sft.md
+    - [x] update docs/4.export-merged.md
+    - [x] update docs/5.awq-compression.md
+    - [x] update docs/6.eval-sft.md
+    - [x] update docs/7.serve-vllm.md
+    - [x] update docs/8.tensorboard.md
+    - [x] update guide.md
 
 # v9 small fixes
 - [ ] add metadata to each log folder. So we have all info about the configs used in detailled for reproducibility purposes and info about the parameters used for each step.
 - [ ] remove sparse_logs if not needed
-- [ ] refractor src/ and scripts/ duplicates. Keep only src/ and remove scripts/. Be sure that the convert-awq still works after the refractoring.
+- [x] refactor src/ and scripts/ duplicates; keep only src/ and ensure convert-awq still works after the change.
 - [ ] make the ouput of the convert-awq better, less noisy, only important info
 - [ ] add progress bar or something for the user to know the progress of the quantization step, currently it seems to hang for long periods of time without any output
 - [ ] `torch_dtype` is deprecated! Use `dtype` instead!
@@ -247,7 +248,7 @@
 - [ ] test the tests after the move to ensure they still run correctly.
 - [ ] refractor and put all dockerfiles into a `docker/` folder for better organization.
 - [ ] verify all files are updated to reflect the new paths.
-- [ ] assess if the awq/ folder can be removed safely, if yes remove it, and verify
+- [x] assess if the awq/ folder can be removed safely, if yes remove it, and verify
 - [ ] remove awq/ in docs and merge the file in it into the `5.awq-compression.md` doc.
 - [ ] check if '/ folder can be removed safely, if yes remove it, and verify
 

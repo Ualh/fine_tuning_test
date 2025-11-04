@@ -270,7 +270,8 @@ def convert_awq(
                 out_rel = _rel_to_project(out_resolved, cfg.project_root, label="Output directory")
 
                 runner_cmd = (
-                    f"python3 /workspace/scripts/awq_runner.py --config '/workspace/{cfg_rel.as_posix()}' "
+                    "python3 -m src.training.awq_runner "
+                    f"--config '/workspace/{cfg_rel.as_posix()}' "
                     f"--merged '/workspace/{merged_rel.as_posix()}' --out '/workspace/{out_rel.as_posix()}'"
                 )
                 if force:

@@ -1,83 +1,123 @@
-## Quick orientation for AI coding assistants
+## Context
 
-This repo is a local, Docker-first LoRA fine-tuning pipeline for AI models with Typer CLI, per-stage run folders, and a vLLM serving path. Keep edits tight and align with these patterns.
+This repo is a local, Docker-first LoRA fine-tuning pipeline for AI models with Typer CLI, per-stage run folders, awq converted model, a vLLM serving path, dozzle logs, and open WebUI integration. 
 
-- Big picture (what touches what)
-  - `run_pipeline.bat` orchestrates Windows workflows end-to-end: builds image, probes runtime via `print-runtime`, runs stages inside the `sft` container, captures container logs into each run folder.
-  - `src/cli/main.py` defines stage commands: `preprocess-sft`, `finetune-sft`, `export-merged`, `convert-awq`, `eval-sft`, `print-runtime`, `smoke-test`. Contract glue lives in `_build_runtime_metadata` (paths, compose name, served model vars).
-  - Modules map 1:1 to stages: `core/` (config, logging, resume, run manager, runtime probe, SSL bypass), `data/preprocess.py`, `training/` (`sft_trainer.py`, `lora_merge.py`), `training/awq_runner.py` (AWQ conversion runner), `eval/evaluator.py`, `serve/vllm_client.py`.
-  - AWQ conversion / llm-compressor (new)
-    - This repo now includes a small, isolated AWQ conversion flow that uses the `llm-compressor` (formerly AutoAWQ). To avoid dependency conflicts with the main `sft` image (notably NumPy/Torch/resolver issues), the converter runs in a separate sidecar image called `awq-runner`.
-    - Key files and entrypoints:
-      - `Dockerfile.awq-runner` — multi-stage image for CPU and GPU runner builds (installs `llmcompressor` and runtime deps).
-      - `src/training/awq_runner.py` — the runner CLI/oneshot implementation. It prefers a pre-installed CLI binary but falls back to an in-process oneshot of the library and always writes a `metadata.json` with invocation results.
-      - `scripts/awq_runner.py` — a thin shim used when running inside containers.
-      - `src/cli/main.py` — adds a `convert-awq` Typer command that the wrapper calls. It will attempt to run conversion inside the `awq-runner` container (via `docker compose run`) and fall back to a local invocation if docker is unavailable.
+### Key directories and files
 
-- Reproducible environments
-  - Docker: `Dockerfile` (CUDA 12.1, Torch 2.2.2) + `docker-compose.yml` (`sft`, `vllm-server`, Dozzle, Open WebUI). Use `run_pipeline.bat up` and run stage commands inside the running `sft` container interactively. Examples:
-    - With the wrapper: `run_pipeline.bat bash` (opens an interactive shell inside the container).
-    - Directly: `docker compose exec sft bash -lc "python3 -m src.cli.main print-runtime --format json"`.
-    - Always execute commands inside the running container interactively by using:
-      `docker exec -it <container> bash -lc "<python command>"`
-      where `-it` attaches our terminal to the container process’s STDOUT/STDERR, so logs and tracebacks stream directly to our PowerShell window in real time.
-  - AWQ runner invocation (wrapper)
-    - After `export-merged` the wrapper will optionally run AWQ conversion if either runtime metadata `AWQ_ENABLED=1` or the caller passed `/force` (which sets `FORCE_AWQ=1`). See the `convert-awq` target for the exact command used.
-    - `run_pipeline.bat` will invoke the runner via:
-      `docker compose run --rm --no-deps -T awq-runner ...`
-      so the conversion executes inside the isolated container by default. If docker is unavailable the CLI will try a local fallback.
+First, understand the repo structure and key files:
+.
+├── .github
+├── .gitignore
+├── .pytest_cache
+├── .venv
+├── Dockerfile                      # (CUDA/Torch image for sft runtime; base for training container)
+├── Dockerfile.awq-runner           # (multi-stage image for isolated AWQ/llm-compressor runner)
+├── README.md
+├── TODO.md
+├── config.yaml                     # (single source of truth for paths/serve settings; loaded by core.config)
+├── config.smoke.yaml
+├── debug_config.yaml
+├── docker-compose.yml              # (compose services: sft, vllm-server, awq-runner sidecar, dozzle, open-webui)
+├── files for CI / setup
+├── open-webui                      # (Web UI files; exposes UI at 3000)
+│   ├── cache
+│   ├── uploads
+│   ├── vector_db
+│   ├── webui.db
+│   └── ... (web UI related cache/uploads)
+├── awq
+│   ├── __init__.py
+│   └── modules
+│       ├── __init__.py
+│       └── linear.py
+├── docs
+│   ├── 1.setup.md
+│   ├── 2.preprocess_sft.md
+│   ├── 3.finetune_sft.md
+│   ├── 4.export_merged.md
+│   ├── 5.awq-compression.md
+│   ├── 6.eval_sft.md
+│   ├── 7.serve_vllm.md
+│   ├── 8.tensorboard.md
+│   ├── guide.md
+│   └── naming_spec.md
+├── prepared
+│   ├── awq_calibration.txt
+│   ├── alpaca_2048
+│   │   ├── metadata.json
+│   │   ├── train.jsonl
+│   │   └── val.jsonl
+│   ├── alpaca_2k_en
+│   ├── alpaca_32
+│   ├── alpaca_full
+│   └── alpaca_full_en
+├── outputs
+│   ├── latest.txt                   # (pointer to last created outputs folder)
+│   ├── autoif_qwen25_05b_lora
+│   ├── run-qwen2-5-0-5b-alpaca-n2048-run7
+│   └── run-qwen2-7b-alpaca-full-run1
+│       ├── adapter/ (adapter files: .safetensors, tokenizer, chat_template, etc.)
+│       ├── merged/ (merged model artifacts, metadata.json, model files)
+│       └── trainer_state/ (checkpoints: checkpoint-*, runs/)
+├── logs
+│   ├── latest.txt                   # (points to newest run root; see RunManager logs/latest.txt)
+│   ├── archives/
+│   └── run-qwen2-7b-alpaca-full-run2/ (per-run logs and console/container logs)
+├── sparse_logs
+│   ├── oneshot_2025-11-03_16-20-32.log
+│   └── ... (other sparse logs)
+├── src
+│   ├── __init__.py
+│   ├── cli
+│   │   ├── main.py        # Typer CLI (preprocess-sft, finetune-sft, export-merged, convert-awq, smoke-test, print-runtime) — (builds runtime metadata used by wrapper)
+│   │   └── __init__.py
+│   ├── core
+│   │   ├── config.py      # (ConfigLoader: loads config.yaml; central source of paths and serve fields)
+│   │   ├── logger.py      # (configure_logging, tee_std_streams; file INFO/DEBUG and run.log/console.log handling)
+│   │   ├── run_manager.py # (RunManager: creates run dirs under logs/<run>/<stage> and manages latest.txt)
+│   │   ├── runtime_probe.py# (probes runtime and builds runtime metadata used by wrapper/CLI)
+│   │   ├── resume.py      # (ResumeManager: resolve --resume-from and checkpoint resolution)
+│   │   ├── ssl.py         # (disable_ssl_verification helper used to match wrapper env)
+│   │   └── tokenizer_utils.py
+│   ├── data
+│   │   └── preprocess.py  # (preprocess stage: builds train.jsonl/val.jsonl and metadata.json)
+│   ├── training
+│   │   ├── sft_trainer.py # (SFTTrainer runner: builds trainer with LoRA and writes adapter + trainer_state)
+│   │   ├── lora_merge.py  # (merger: merges adapter into base and writes outputs/.../merged/)
+│   │   ├── awq_runner.py / awq_converter.py # (AWQ runner CLI: in-container first, fallback local; writes metadata.json)
+│   │   └── checkpointer.py
+│   ├── eval
+│   │   └── evaluator.py   # (Evaluator: optional perplexity and prompt-based checks; writes eval/metrics.json)
+│   └── serve
+│       └── vllm_client.py # (vLLM client used by smoke-test; reads SERVED_MODEL_PATH from runtime metadata)
+└── tests
+  ├── conftest.py
+  ├── test_cli_paths.py            # (tests _build_runtime_metadata / path contract between wrapper and CLI)
+  ├── test_runtime_probe.py        # (tests runtime_probe behavior)
+  ├── test_pipeline_smoke.py       # (smoke test exercising end-to-end compose+stages)
+  ├── test_sft_trainer_loader.py   # (trainer loading and accelerate/transformers compatibility)
+  ├── test_hf_connectivity.py      # (HF hub connectivity tests; interacts with disable_ssl_verification)
+  ├── test_config_loader.py
+  ├── test_resume_manager.py
+  ├── test_run_manager.py
+  ├── test_tensorboard_logging.py
+  └── awq
+    └── test_awq_runner.py      # (tests AWQ conversion runner and metadata output)
 
-- Logging, error handling, and debugging
-  - Use `core.logger.configure_logging` in stages: console at INFO (single, minimal progress bar from Trainer), files at DEBUG. Live, detailed traces go to `run.log`; stdout/stderr are mirrored to `console.log` via `tee_std_streams`; wrapper saves Docker logs to `container.log`.
-  - Wrap critical blocks with `try/except` and call `log_exception_with_locals(logger, msg, exc)` for Rich tracebacks with locals (already used in CLI commands). Always call `finalize_logger` in `finally`.
-  - Run directories are created by `core.run_manager.RunManager` under `logs/<run-name>/<stage>/`, with `logs/latest.txt` pointing to the newest run root.
-  - AWQ runner logging and metadata
-    - The AWQ runner writes a `metadata.json` into the conversion output folder and logs to the pipeline's per-stage `run.log`/`console.log`. If conversion fails inside the container the wrapper will capture container logs into `container.log` under the run folder — inspect `logs/latest.txt` then open the `convert-awq` subfolder.
 
-- Configuration and conventions
-  - Single source of truth: `config.yaml` → `core.config.ConfigLoader` (dataclasses). Paths resolve relative to repo root; UNC mounts supported via `paths.models_mount`.
-  - Directory naming: `_default_preprocess_dir()` → `prepared/<dataset>_<full|N>`, `_default_output_dir()` → `outputs/<dataset>_nN_<model>`. `sample_size: null|full` means “full dataset”; else tag as `n{size}`.
-  - Resume semantics: use `--resume-from` (CLI) or env to point to a trainer checkpoint dir; resolution handled by `core.resume.ResumeManager`.
-  - Runtime metadata and env vars (AWQ)
-    - The runtime probe exposes `AWQ_ENABLED`, `AWQ_GPU_ENABLED` and `AWQ_OUTPUT_SUFFIX` so the wrapper and CLI can decide whether and how to run the conversion.
+## If need to debug a problem, otherwise skip
 
-- Stage specifics and examples
-  - Preprocess: loads HF dataset, optional language filter, train/val split, chat templating via `ensure_chat_template`; writes `train.jsonl`, `val.jsonl`, and `metadata.json`.
-  - Finetune: `training/SFTTrainerRunner` patches Transformers/Accelerate for compat, builds `SFTTrainer` with LoRA (`peft.LoraConfig`), saves adapter under `outputs/.../adapter/` and `trainer_state/`.
-  - Export: `training/LoraMerger` merges adapter into base, saves to `outputs/.../merged/` and writes `metadata.json`.
-  - AWQ conversion / llm-compressor: conversion flow details
-    - Runs in the `awq-runner` sidecar to avoid dependency conflicts with `sft`.
-    - The converter prefers invoking a pre-installed CLI binary in the container but falls back to an in-process library call. Always writes `metadata.json` capturing invocation results and exit status.
-    - The `convert-awq` Typer command orchestrates attempts to run in-container first (via docker compose) and falls back to a local execution if necessary.
-  - Eval: `eval/Evaluator` optional perplexity on a JSONL split and prompt-based checks (language via `langdetect`), writes `eval/metrics.json`.
-  - Serve: `docker-compose` service `vllm-server` reads `SERVED_MODEL_PATH` from runtime metadata; smoke test with `python -m src.cli.main smoke-test`.
-
-- Orchestration truths that bite
-  - Wrapper ←→ CLI contract: if you change paths/slug rules, update both `main._build_runtime_metadata` and `run_pipeline.bat :load_runtime` (compose project name, container paths, served model fields) and fix tests.
-  - Tests to watch: `tests/test_cli_paths.py`, `test_pipeline_smoke.py`, `test_runtime_probe.py`, `test_accelerate_compat.py`, `test_sft_trainer_loader.py`, `test_hf_connectivity.py`.
-  - When adding AWQ runner or altering runtime probe, update both `_build_runtime_metadata` and the wrapper's `:load_runtime` logic so `AWQ_*` fields and compose service `awq-runner` are consistent.
-
-- External dependencies and network pragmatics
-  - HF hub access uses `disable_ssl_verification()` in each stage to align with wrapper env. Re-enabling SSL may break tests; adjust both places if you do.
-  - vLLM container exposes port 8080; Open WebUI at 3000; Dozzle at 9999. Served model name/len come from `serve.*` in `config.yaml`.
-  - AWQ / llm-compressor isolation rationale
-    - The AWQ toolchain can introduce NumPy/Torch/resolver conflicts. Keeping it in `awq-runner` avoids contaminating the main `sft` runtime image.
-
-If anything above is unclear or you need more examples (e.g., adding a compose service, adjusting LoRA targets, or where to mock HF calls in tests), ping which area to expand and we’ll tighten this guide.
-
-## Debug recipes
-
-When a stage fails, follow this disciplined debugging loop: reflect on 5–7 possible root causes, pick the 1–2 most likely, and add targeted logs/assertions to validate or falsify those hypotheses before changing code.
+follow this disciplined debugging loop: reflect on 5–7 possible root causes, pick the 1–2 most likely, and add targeted logs/assertions to validate or falsify those hypotheses before changing code.
 
 1. Quick status gathering
    - Inspect the latest run folder (pointer: `logs/latest.txt`) then open `run.log`, `console.log`, and `container.log` for timestamps and rich tracebacks.
-   - Run `python -m src.cli.main print-runtime --format json --config config.yaml` (locally or inside container) and verify `PREPROCESS_DIR`, `MERGED_DIR`, and `SERVED_MODEL_PATH` match expectations.
+   - Run `python -m src.cli.main print-runtime --format json --config config.yaml` (inside container) and verify `PREPROCESS_DIR`, `MERGED_DIR`, and `SERVED_MODEL_PATH` match expectations.
 
 2. Common suspects (reflect on these 5–7 sources):
     - identify comon failure modes relevant to the error
 
 3. Narrow to 1–2 likely causes
-   - Prioritize the two that best explain the observed error and are easiest to validate (e.g., config mismatch + missing checkpoint).
+   - Prioritize the two that best explain the observed error and are easiest to validate
 
 4. Add lightweight validations/logging (examples)
    - Insert temporary logger calls or assert statements near the failure site to print the resolved path, env vars, or presence of checkpoint files.
@@ -88,7 +128,7 @@ When a stage fails, follow this disciplined debugging loop: reflect on 5–7 pos
 
 Guiding rule: never ship a code fix until you can demonstrate via logs that the failing state changes (before/after snippets), or you can reproduce locally with a minimized config (use `debug_config.yaml`).
 
-## Contributor style — comments & docstrings
+## Always add clear docs
 
 Write docstrings and comments as if explaining the module to a new contributor who just opened the repo. Be concise, precise, and point readers where to look next.
 
@@ -116,3 +156,6 @@ Write docstrings and comments as if explaining the module to a new contributor w
 
 - Logging and diagnostics
   - Prefer `logger` instances (passed into modules) over `print()` for library code. Log key runtime values at INFO and detailed internals at DEBUG. Mirror stdout to `console.log` via `core.logger
+
+  ## ALWAYS:
+  - ask when uncertain or when more context is needed
