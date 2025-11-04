@@ -30,6 +30,24 @@ set "SERVED_MODEL_PATH="
 set "SERVED_MODEL_NAME="
 set "SERVED_MODEL_MAX_LEN="
 set "SERVE_PORT="
+set "PIPELINE_STAGE="
+
+if not defined HOST_COMPOSE_PROJECT (
+    if defined COMPOSE_PROJECT_NAME (
+        set "HOST_COMPOSE_PROJECT=%COMPOSE_PROJECT_NAME%"
+    )
+)
+if not defined HOST_COMPOSE_PROJECT (
+    if defined COMPOSE_PROJECT (
+        set "HOST_COMPOSE_PROJECT=%COMPOSE_PROJECT%"
+    )
+)
+if not defined HOST_COMPOSE_PROJECT (
+    set "HOST_COMPOSE_PROJECT=sft"
+)
+if not defined COMPOSE_PROJECT (
+    set "COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%"
+)
 
 REM ============================================================================
 REM ============================ Parse arguments ===============================
@@ -99,32 +117,53 @@ REM ============================================================================
 REM ============================= Commands =====================================
 REM ============================================================================
 :build
-REM Build should not require runtime metadata; call docker compose directly
-REM Always show build output (disable quiet mode so users see progress and errors)
-docker compose build
+REM Build should use the same compose project as other stages; resolve via
+REM runtime probe to keep image tags and container names consistent.
+call :ensure_runtime
+if errorlevel 1 goto :eof
+call :compose build
 goto :eof
 
 :up
+set "PIPELINE_STAGE=up"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
     call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
+set "PIPELINE_STAGE="
 goto :eof
 
 :down
+set "PIPELINE_STAGE=down"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 call :compose down --remove-orphans
+set "PIPELINE_STAGE="
 goto :eof
 
 :bash
+set "PIPELINE_STAGE=bash"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 call :compose exec %SERVICE% bash
+set "PIPELINE_STAGE="
 goto :eof
 
 :preprocess
+set "PIPELINE_STAGE=preprocess-sft"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 if defined PREPROCESS_DIR_CONTAINER echo [PREPROCESS] output=!PREPROCESS_DIR_CONTAINER!
 set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
@@ -134,11 +173,16 @@ echo [CMD] %CMD%
 call :compose exec %SERVICE% bash -lc "!RUN_ENV_EXPORT!%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs preprocess
+set "PIPELINE_STAGE="
 goto :eof
 
 :finetune
+set "PIPELINE_STAGE=finetune-sft"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 if defined PREPROCESS_DIR_CONTAINER echo [FINETUNE] data=!PREPROCESS_DIR_CONTAINER!
 if defined OUTPUT_DIR_CONTAINER echo [FINETUNE] output=!OUTPUT_DIR_CONTAINER!
 if defined TENSORBOARD_LOGDIR echo [FINETUNE] TensorBoard=http://localhost:6006 (logdir=!TENSORBOARD_LOGDIR!)
@@ -159,11 +203,29 @@ echo [CMD] %CMD%
 call :compose exec %SERVICE% bash -lc "!RUN_ENV_EXPORT!%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs finetune
+if "%PIPELINE_EXIT_CODE%"=="0" (
+    if defined POST_FINETUNE_TARGETS (
+        echo [PIPELINE] post-finetune targets: !POST_FINETUNE_TARGETS!
+        for %%S in (!POST_FINETUNE_TARGETS!) do (
+            call :run_post_stage %%S
+            if errorlevel 1 (
+                set "PIPELINE_EXIT_CODE=!ERRORLEVEL!"
+                set "PIPELINE_STAGE="
+                goto :eof
+            )
+        )
+    )
+)
+set "PIPELINE_STAGE="
 goto :eof
 
 :export
+set "PIPELINE_STAGE=export-merged"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 if defined MERGED_DIR_CONTAINER echo [EXPORT] merged=!MERGED_DIR_CONTAINER!
 set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
@@ -186,51 +248,73 @@ if "%AWQ_ENABLED%"=="1" set "RUN_AWQ=1"
     echo [AWQ] Decision vars: AWQ_ENABLED=%AWQ_ENABLED% FORCE_AWQ=%FORCE_AWQ% MERGED_DIR=%MERGED_DIR%
     echo [AWQ] Computed RUN_AWQ=%RUN_AWQ%
 if "%RUN_AWQ%"=="1" (
-    if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
-    set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
-    set "CONFIG_POSIX=%CONFIG_POSIX%"
-    set "RUNNER_BASE=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
-    if defined FORCE_AWQ (
-        set "RUNNER_BASE=!RUNNER_BASE! --force"
+    if not defined FORCE_AWQ (
+        if defined POST_FINETUNE_TARGETS (
+            echo !POST_FINETUNE_TARGETS!| findstr /I /C:"convert-awq" >nul
+            if not errorlevel 1 (
+                echo [AWQ] convert-awq scheduled after finetune; skipping inline AWQ in export stage
+                set "RUN_AWQ=0"
+            )
+        )
     )
+)
+if "%RUN_AWQ%"=="1" (
+    if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
+    call :capture_container_logs convert-awq awq-runner
+    set "CONFIG_POSIX=%CONFIG%"
+    set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
+    set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
+    set "RUNNER_BASE=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
+    if defined FORCE_AWQ set "RUNNER_BASE=!RUNNER_BASE! --force"
+    if "%AWQ_GPU_ENABLED%"=="1" set "RUNNER_BASE=!RUNNER_BASE! --gpu"
     echo [CMD] !RUNNER_BASE!
     call :compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!RUNNER_BASE!"
     set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
-    call :capture_container_logs convert-awq
+    call :capture_container_logs convert-awq awq-runner
 )
+set "PIPELINE_STAGE="
 goto :eof
 
 :: ---------------------------------------------------------------------------
 :convert_awq
+set "PIPELINE_STAGE=convert-awq"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 echo [AWQ] Starting AWQ conversion check
-set "CONFIG_POSIX=%CONFIG%"
-set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 :: Decide whether to run AWQ: respect runtime AWQ_ENABLED or explicit FORCE_AWQ
 set "RUN_AWQ=0"
 if defined FORCE_AWQ set "RUN_AWQ=1"
 if "%AWQ_ENABLED%"=="1" set "RUN_AWQ=1"
 if "%RUN_AWQ%"=="1" (
     if not defined MERGED_DIR (echo [ERROR] MERGED_DIR not set in runtime; cannot run AWQ & exit /b 2)
+    call :capture_container_logs convert-awq awq-runner
+    set "CONFIG_POSIX=%CONFIG%"
+    set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
     if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
     set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
-    set "CMD_BASE=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
-    if defined FORCE_AWQ (
-        set "CMD_BASE=!CMD_BASE! --force"
-    )
-    echo [CMD] !CMD_BASE!
-    call :compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!CMD_BASE!"
+    set "RUNNER_BASE=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
+    if defined FORCE_AWQ set "RUNNER_BASE=!RUNNER_BASE! --force"
+    if "%AWQ_GPU_ENABLED%"=="1" set "RUNNER_BASE=!RUNNER_BASE! --gpu"
+    echo [CMD] !RUNNER_BASE!
+    call :compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!RUNNER_BASE!"
     set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
-    call :capture_container_logs convert-awq
+    call :capture_container_logs convert-awq awq-runner
 ) else (
     echo [AWQ] AWQ conversion not requested (AWQ_ENABLED=%AWQ_ENABLED% FORCE_AWQ=%FORCE_AWQ%)
 )
+set "PIPELINE_STAGE="
 goto :eof
 
 :tensorboard_up
+set "PIPELINE_STAGE=tensorboard-up"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 echo [TENSORBOARD] Launching dashboard on http://localhost:6006
 if defined TENSORBOARD_LOGDIR echo [TENSORBOARD] tracking !TENSORBOARD_LOGDIR!
 REM Ensure the tensorboard image exists. Build explicitly to avoid `--no-build` skipping
@@ -240,20 +324,31 @@ if errorlevel 1 (
     echo [WARN] Building tensorboard image failed or aborted; attempting to start without build
 )
 call :compose up -d tensorboard
+set "PIPELINE_STAGE="
 goto :eof
 
 :tensorboard_down
+set "PIPELINE_STAGE=tensorboard-down"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 echo [TENSORBOARD] Stopping dashboard service
 call :compose stop tensorboard >nul 2>&1
+set "PIPELINE_STAGE="
 goto :eof
 
 :tensorboard_logs
+set "PIPELINE_STAGE=tensorboard-logs"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 echo [TENSORBOARD] Streaming container logs (Ctrl+C to stop)
 call :compose logs -f tensorboard
+set "PIPELINE_STAGE="
 goto :eof
 
 :run_name_preview
@@ -261,7 +356,7 @@ call :build_naming_export
 set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 if "%DEBUG_PIPELINE%"=="1" echo [PREVIEW] resolving run name via container
-docker compose run --rm --no-deps -e "HOST_COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%" -T %SERVICE% bash -lc "!NAMING_EXPORT!python3 -m src.cli.main run-name-preview --config '%CONFIG_POSIX%'"
+call :compose run --rm --no-deps -e "HOST_COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%" -T %SERVICE% bash -lc "!NAMING_EXPORT!python3 -m src.cli.main run-name-preview --config '%CONFIG_POSIX%'"
 set "STATUS=%ERRORLEVEL%"
 if %STATUS% EQU 0 goto :preview_done
 echo [WARN] Container preview failed (%STATUS%). Falling back to local Python...
@@ -274,8 +369,12 @@ set "PIPELINE_EXIT_CODE=0"
 goto :eof
 
 :evaluate
+set "PIPELINE_STAGE=eval-sft"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 if defined MERGED_DIR_CONTAINER echo [EVAL] model=!MERGED_DIR_CONTAINER!
 if defined EVAL_DIR_CONTAINER echo [EVAL] output=!EVAL_DIR_CONTAINER!
 set "CONFIG_POSIX=%CONFIG%"
@@ -286,11 +385,16 @@ call :compose up %COMPOSE_NO_BUILD_FLAG% -d %SERVICE%
 call :compose exec %SERVICE% bash -lc "!RUN_ENV_EXPORT!%CMD%"
 set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
 call :capture_container_logs eval
+set "PIPELINE_STAGE="
 goto :eof
 
 :serve
+set "PIPELINE_STAGE=serve-vllm"
 call :ensure_runtime
-if errorlevel 1 goto :eof
+if errorlevel 1 (
+    set "PIPELINE_STAGE="
+    goto :eof
+)
 if not defined SERVE_PORT set "SERVE_PORT=8080"
 set "SERVE_DISPLAY=localhost"
 if defined SERVE_HOST (
@@ -310,6 +414,7 @@ if errorlevel 1 goto :eof
 echo [INFO] vLLM server exposed on http://%SERVE_DISPLAY%:%SERVE_PORT%
 echo [INFO] Dozzle logs UI:      http://localhost:9999
 echo [INFO] Open WebUI:          http://localhost:3000
+set "PIPELINE_STAGE="
 goto :eof
 
 :showlast
@@ -322,7 +427,7 @@ goto :eof
 
 :clean
 echo [CLEAN] Stopping project and removing orphans...
-docker compose down --remove-orphans
+call :compose down --remove-orphans
 echo [CLEAN] Pruning stopped containers, dangling images, volumes and networks...
 docker container prune -f >nul 2>&1
 docker image prune -f >nul 2>&1
@@ -376,14 +481,20 @@ set "RUNTIME_RAW=%TEMP%\pipeline_runtime_%RANDOM%_%RANDOM%.raw"
 set "CONFIG_POSIX=%CONFIG%"
 set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
 call :build_naming_export
+set "RUNTIME_STAGE_ARG="
+set "RUNTIME_STAGE_ARG_WIN="
+if defined PIPELINE_STAGE (
+    set "RUNTIME_STAGE_ARG= --stage '%PIPELINE_STAGE%'"
+    set "RUNTIME_STAGE_ARG_WIN= --stage \"%PIPELINE_STAGE%\""
+)
 if "%DEBUG_PIPELINE%"=="1" echo [TRACE] invoking docker runtime probe for config=%CONFIG_POSIX%
-docker compose run --rm --no-deps -e "HOST_COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%" -T %SERVICE% bash -lc "!NAMING_EXPORT!python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env" >"%RUNTIME_RAW%"
+call :compose run --rm --no-deps -e "HOST_COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%" -T %SERVICE% bash -lc "!NAMING_EXPORT!python3 -m src.cli.main print-runtime --config '%CONFIG_POSIX%' --format env!RUNTIME_STAGE_ARG!" >"%RUNTIME_RAW%"
 set "STATUS=%ERRORLEVEL%"
 if "%DEBUG_PIPELINE%"=="1" echo [TRACE] docker probe exit status=%STATUS%
 if %STATUS% EQU 0 goto :runtime_filter
 
 echo [WARN] Docker runtime probe failed (%STATUS%). Falling back to local Python...
-python -m src.cli.main print-runtime --config "%CONFIG%" --format env >"%RUNTIME_RAW%"
+python -m src.cli.main print-runtime --config "%CONFIG%" --format env%RUNTIME_STAGE_ARG_WIN% >"%RUNTIME_RAW%"
 set "STATUS=%ERRORLEVEL%"
 if "%DEBUG_PIPELINE%"=="1" echo [TRACE] local probe exit status=%STATUS%
 if %STATUS% NEQ 0 goto :runtime_error
@@ -397,6 +508,19 @@ if %STATUS% NEQ 0 goto :runtime_error
 if "%DEBUG_PIPELINE%"=="1" echo [TRACE] applying environment variables from filtered probe
 for /f "usebackq tokens=1,* delims==" %%A in ("%RUNTIME_FILE%") do (
     set "%%A=%%B"
+)
+
+REM If the host exported a preferred compose project name, force it here so
+REM all subsequent docker compose commands use a single, stable project.
+if defined HOST_COMPOSE_PROJECT (
+    if defined COMPOSE_PROJECT (
+        set "HOST_COMPOSE_PROJECT=%COMPOSE_PROJECT%"
+    ) else (
+        set "COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%"
+    )
+) else (
+    if not defined COMPOSE_PROJECT set "COMPOSE_PROJECT=sft"
+    set "HOST_COMPOSE_PROJECT=%COMPOSE_PROJECT%"
 )
 
 if exist "%RUNTIME_FILE%" del "%RUNTIME_FILE%" >nul 2>&1
@@ -416,11 +540,15 @@ exit /b %STATUS%
 set "NAMING_EXPORT="
 REM Derive a stable host project name to export so in-container probes return
 REM the same compose project as the host. If the caller already set
-REM HOST_COMPOSE_PROJECT, keep it; otherwise derive it from the script dir.
+REM HOST_COMPOSE_PROJECT, keep it; otherwise fall back to COMPOSE_PROJECT_NAME
+REM or the SFT default.
 if not defined HOST_COMPOSE_PROJECT (
-    for %%I in ("%_SCRIPT_DIR%") do (
-        set "HOST_COMPOSE_PROJECT=%%~nI"
+    if defined COMPOSE_PROJECT_NAME (
+        set "HOST_COMPOSE_PROJECT=%COMPOSE_PROJECT_NAME%"
     )
+)
+if not defined HOST_COMPOSE_PROJECT (
+    set "HOST_COMPOSE_PROJECT=sft"
 )
 for %%V in (RUN_NAME FORCE_RUN_NAME RUN_INDEX FORCE_RUN_INDEX LEGACY_RUN_NAME USE_LEGACY_NAMING) do (
     if defined %%V (
@@ -432,18 +560,60 @@ if defined NAMING_EXPORT (
 )
 exit /b 0
 
+:ensure_host_compose_project
+if defined COMPOSE_PROJECT goto :eof
+if defined HOST_COMPOSE_PROJECT (
+    set "COMPOSE_PROJECT=%HOST_COMPOSE_PROJECT%"
+    goto :eof
+)
+for /f "usebackq tokens=* delims=" %%P in (`python -c "from pathlib import Path; name = Path(r'%_SCRIPT_DIR%').name.lower(); name = (name[:62] if name else '').rstrip('-'); name = name or 'pipeline'; name = name if name[0].isalpha() else (('proj-' + name)[:62].rstrip('-') or 'pipeline'); print(name)"`) do (
+    set "COMPOSE_PROJECT=%%P"
+)
+if not defined COMPOSE_PROJECT set "COMPOSE_PROJECT=pipeline"
+set "HOST_COMPOSE_PROJECT=%COMPOSE_PROJECT%"
+exit /b 0
+
+:run_post_stage
+setlocal EnableExtensions EnableDelayedExpansion
+set "NEXT=%~1"
+if /I "!NEXT!"=="export-merged" (
+    endlocal
+    call :export
+    exit /b %ERRORLEVEL%
+)
+if /I "!NEXT!"=="convert-awq" (
+    endlocal
+    call :convert_awq
+    exit /b %ERRORLEVEL%
+)
+if /I "!NEXT!"=="eval-sft" (
+    endlocal
+    call :evaluate
+    exit /b %ERRORLEVEL%
+)
+if /I "!NEXT!"=="serve-vllm" (
+    endlocal
+    call :serve
+    exit /b %ERRORLEVEL%
+)
+echo [WARN] Unknown post-finetune target: !NEXT!
+endlocal
+exit /b 0
+
 :compose
-if defined COMPOSE_PROJECT (
-    docker compose -p "%COMPOSE_PROJECT%" %*
-)
-if not defined COMPOSE_PROJECT (
-    docker compose %*
-)
-exit /b %ERRORLEVEL%
+setlocal EnableExtensions EnableDelayedExpansion
+set "__PROJECT=%COMPOSE_PROJECT%"
+if not defined __PROJECT set "__PROJECT=%HOST_COMPOSE_PROJECT%"
+if not defined __PROJECT set "__PROJECT=sft"
+docker compose -p "!__PROJECT!" %*
+set "__STATUS=%ERRORLEVEL%"
+endlocal & exit /b %__STATUS%
 
 :capture_container_logs
 setlocal EnableExtensions EnableDelayedExpansion
 set "STAGE=%~1"
+set "TARGET_SERVICE=%~2"
+if not defined TARGET_SERVICE set "TARGET_SERVICE=%SERVICE%"
 if not exist logs\latest.txt goto :capture_done
 set "LATEST="
 for /f "usebackq tokens=* delims=" %%L in ("logs\latest.txt") do set "LATEST=%%L"
@@ -453,9 +623,11 @@ set "HOST_PATH=!HOST_PATH:/=\!"
 if "!HOST_PATH:~0,1!"=="\" set "HOST_PATH=!HOST_PATH:~1!"
 if not defined HOST_PATH goto :capture_done
 if not exist "!HOST_PATH!" goto :capture_done
-set "TARGET_FILE=!HOST_PATH!\container.log"
+set "STAGE_PATH=!HOST_PATH!\%STAGE%"
+if not exist "!STAGE_PATH!" mkdir "!STAGE_PATH!" >nul 2>&1
+set "TARGET_FILE=!STAGE_PATH!\container.log"
 echo [LOGS] Capturing docker logs for %STAGE% into !TARGET_FILE!
-call :compose logs --no-color --timestamps --tail 2000 %SERVICE% >"!TARGET_FILE!" 2>&1
+call :compose logs --no-color --timestamps --tail 2000 !TARGET_SERVICE! >"!TARGET_FILE!" 2>&1
 if errorlevel 1 (
     echo [WARN] Unable to capture docker logs for %STAGE%>>"!TARGET_FILE!"
 )

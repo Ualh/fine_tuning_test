@@ -89,8 +89,9 @@ services:
     .\run_pipeline.bat eval-sft
     ```
 
-    ## 5) Serve with vLLM
-    The server mounts `./outputs` to `/models` and uses `serve.served_model_relpath` to locate the merged model.
+  ## 5) Serve with vLLM
+  The server mounts `./outputs` to `/models` and auto-selects `<run>/merged_awq` when available.
+  Control this via `serve.prefer_awq` or override the folder with `serve.served_model_relpath` (relative to `outputs/`).
     ```powershell
     .\run_pipeline.bat serve-vllm
     ```

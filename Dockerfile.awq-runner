@@ -10,6 +10,11 @@ ARG LLMCOMPRESSOR_VERSION=0.8.1
 
 ########## CPU stage (default) ##########
 FROM python:3.11-slim AS cpu
+LABEL org.opencontainers.image.title="SFT AWQ Runner" \
+    org.opencontainers.image.description="llmcompressor sidecar for SFT AWQ conversion" \
+    org.opencontainers.image.vendor="SFT" \
+    org.opencontainers.image.source="https://github.com/Ualh/fine_tuning_test" \
+    org.opencontainers.image.licenses="MIT"
 WORKDIR /workspace
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -26,10 +31,13 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 COPY src/training /workspace/scripts
 RUN chmod +x /workspace/scripts/*.py || true
 
-ENTRYPOINT ["/bin/sh", "-c", "tail -f /dev/null"]
-
 ########## GPU stage (target: gpu) ##########
 FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04 AS gpu
+LABEL org.opencontainers.image.title="SFT AWQ Runner (GPU)" \
+    org.opencontainers.image.description="CUDA runtime for SFT AWQ conversion" \
+    org.opencontainers.image.vendor="SFT" \
+    org.opencontainers.image.source="https://github.com/Ualh/fine_tuning_test" \
+    org.opencontainers.image.licenses="MIT"
 WORKDIR /workspace
 
 ARG LLMCOMPRESSOR_VERSION
@@ -49,5 +57,3 @@ RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
 
 COPY src/training /workspace/scripts
 RUN chmod +x /workspace/scripts/*.py || true
-
-ENTRYPOINT ["/bin/sh", "-c", "tail -f /dev/null"]

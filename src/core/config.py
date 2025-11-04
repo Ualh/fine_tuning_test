@@ -93,8 +93,10 @@ class ServeConfig:
     port: int
     max_model_len: int
     served_model_name: str
-    served_model_relpath: Optional[str]
-    resume_from: Optional[str]
+    served_model_relpath: Optional[str] = None
+    resume_from: Optional[str] = None
+    prefer_awq: bool = True
+    model_name: Optional[str] = None
 
 
 @dataclass
@@ -103,6 +105,13 @@ class LoggingConfig:
     file_level: str
     tqdm_refresh_rate: float
     debug_pipeline: bool = False
+
+
+@dataclass
+class OrchestrationConfig:
+    """Configure optional cross-stage orchestration behaviour."""
+
+    post_finetune: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -152,6 +161,7 @@ class PipelineConfig:
     logging: LoggingConfig
     naming: NamingConfig
     awq_conversion: Optional["AwqConversionConfig"]
+    orchestration: OrchestrationConfig
     project_root: Path
 
 
@@ -180,6 +190,7 @@ class ConfigLoader:
             logging=self._parse_logging(),
             naming=self._parse_naming(),
             awq_conversion=self._parse_awq_conversion(),
+            orchestration=self._parse_orchestration(),
             project_root=self.project_root,
         )
 
@@ -301,6 +312,8 @@ class ConfigLoader:
             served_model_name=data.get("served_model_name", "model"),
             served_model_relpath=self._to_optional_str(data.get("served_model_relpath")),
             resume_from=self._to_optional_str(data.get("resume_from")),
+            prefer_awq=bool(self._to_bool(data.get("prefer_awq", True))),
+            model_name=self._to_optional_str(data.get("model_name")),
         )
 
     def _parse_logging(self) -> LoggingConfig:
@@ -311,6 +324,15 @@ class ConfigLoader:
             tqdm_refresh_rate=float(data.get("tqdm_refresh_rate", 1.0)),
             debug_pipeline=bool(self._to_bool(data.get("debug_pipeline", False))),
         )
+
+    def _parse_orchestration(self) -> OrchestrationConfig:
+        data = self.raw.get("orchestration", {}) or {}
+        raw_post = data.get("post_finetune", [])
+        if isinstance(raw_post, (str, bytes)):
+            post_finetune = [item.strip() for item in str(raw_post).split(",") if item.strip()]
+        else:
+            post_finetune = [str(item).strip() for item in (raw_post or []) if str(item).strip()]
+        return OrchestrationConfig(post_finetune=post_finetune)
 
     def _parse_naming(self) -> NamingConfig:
         data = self.raw.get("naming", {}) or {}

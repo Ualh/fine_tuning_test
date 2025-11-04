@@ -56,6 +56,21 @@ export:
   include_adapter_weights: true
   resume_from: null
 
+awq:
+  enabled: true
+  gpu_enabled: false
+  method: awq
+  scheme: W4A16_ASYM
+  num_calibration_samples: 32
+  calib_text_file: prepared/awq_calibration.txt
+  extra_args: []
+  use_smoothquant: true
+  smoothquant_strength: 0.8
+  max_seq_length: 1024
+  output_suffix: awq
+  ignore:
+    - lm_head
+
 eval:
   cutoff_len: 512
   max_new_tokens: 64
@@ -72,7 +87,9 @@ serve:
   port: 8080
   max_model_len: 512
   served_model_name: Qwen2.5-0.5B-SFT-DEBUG
-  served_model_relpath: none
+  prefer_awq: true
+  served_model_relpath: null
+  model_name: null
   resume_from: null
 
 logging:
@@ -91,17 +108,9 @@ naming:
   max_name_length: 128
   use_legacy: false
 
-awq:
-  enabled: true
-  gpu_enabled: false
-  method: awq
-  scheme: W4A16_ASYM
-  num_calibration_samples: 32
-  calib_text_file: prepared/awq_calibration.txt
-  extra_args: []
-  use_smoothquant: true
-  smoothquant_strength: 0.8
-  max_seq_length: 1024
-  output_suffix: awq
-  ignore:
-    - lm_head
+orchestration:
+  post_finetune:
+    - export-merged
+    - convert-awq
+    - eval-sft
+    - serve-vllm

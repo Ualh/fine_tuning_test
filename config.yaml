@@ -77,7 +77,9 @@ serve:
   port: 8080
   max_model_len: 2048
   served_model_name: Qwen2-7B-SFT
-  served_model_relpath: autoif_qwen25_05b_lora/merged
+  prefer_awq: true
+  served_model_relpath: null
+  model_name: null
   resume_from: null
 
 logging:
@@ -110,3 +112,10 @@ awq:
   output_suffix: awq
   ignore:
     - lm_head
+
+orchestration:
+  post_finetune:
+    - export-merged
+    - convert-awq
+    - eval-sft
+    - serve-vllm

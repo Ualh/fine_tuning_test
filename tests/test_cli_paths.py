@@ -1,9 +1,27 @@
+import os
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
 import yaml
 
 from src.cli.main import app, _default_output_dir, _default_preprocess_dir, _load_config
+def _strip_ansi(value: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", value)
+
+
+def _combined_output(result) -> str:
+    parts = []
+    stderr_bytes = getattr(result, "stderr_bytes", None)
+    if stderr_bytes:
+        parts.append(stderr_bytes.decode("utf-8", errors="ignore"))
+    parts.append(result.output)
+    stderr_text = getattr(result, "stderr", None)
+    if stderr_text:
+        parts.append(stderr_text)
+    return _strip_ansi("".join(parts))
+
+
 from src.core.run_naming import build_run_name
 
 
@@ -46,7 +64,7 @@ def test_default_paths(tmp_path):
 
 def test_print_runtime_env_format(tmp_path):
     cfg, tmp_config = _prepare_isolated_config(tmp_path)
-    runner = CliRunner()
+    runner = CliRunner(mix_stderr=False)
     result = runner.invoke(app, ["print-runtime", "--config", str(tmp_config), "--format", "env"])
 
     assert result.exit_code == 0, result.output
@@ -60,16 +78,19 @@ def test_print_runtime_env_format(tmp_path):
     merged_rel = (
         (Path(cfg.paths.outputs_dir) / run_name / "merged").relative_to(cfg.project_root).as_posix()
     )
-    served_rel = cfg.serve.served_model_relpath.replace("\\", "/")
+    expected_served_rel = f"{run_name}/merged"
 
     # Compose project should be derived from the project folder name to keep
     # container/image names stable across runs (avoid per-run proliferation).
-    expected_project = cfg.project_root.name.lower()
-    assert runtime["COMPOSE_PROJECT"].startswith(expected_project[:3])
+    expected_project = os.environ.get("HOST_COMPOSE_PROJECT") or os.environ.get("COMPOSE_PROJECT_NAME") or "sft"
+    expected_project = re.sub(r"[^a-z0-9_-]+", "-", expected_project.lower()).strip("-") or "sft"
+    assert runtime["COMPOSE_PROJECT"] == expected_project
     assert runtime["RUN_NAME"] == run_name
     assert runtime["PREPROCESS_DIR"] == preprocess_rel
     assert runtime["MERGED_DIR"] == merged_rel
-    assert runtime["SERVED_MODEL_PATH"].endswith(served_rel)
+    assert runtime["SERVED_MODEL_RELPATH"] == expected_served_rel
+    assert runtime["SERVED_MODEL_PATH"] == f"/models/{expected_served_rel}"
+    assert runtime["SERVED_MODEL_SOURCE"] == "merged"
     assert runtime["RUN_OUTPUTS_DIR"].endswith(run_name)
     assert runtime["RUN_LOGS_DIR"].endswith(run_name)
     assert runtime["RUN_OUTPUTS_DIR_CONTAINER"].startswith("/app/")
@@ -83,7 +104,7 @@ def test_print_runtime_env_format(tmp_path):
 
 def test_run_name_preview(tmp_path):
     _, tmp_config = _prepare_isolated_config(tmp_path)
-    runner = CliRunner()
+    runner = CliRunner(mix_stderr=False)
 
     first = runner.invoke(app, ["run-name-preview", "--config", str(tmp_config)])
     assert first.exit_code == 0, first.output
@@ -105,3 +126,54 @@ def test_run_name_preview(tmp_path):
     assert runtime["RUN_NAME"] == preview_name
     assert runtime["RUN_DIR_NAME"] == preview_name
     assert runtime["MERGED_DIR"].endswith(f"{preview_name}/merged")
+
+
+def test_export_requires_existing_run(tmp_path):
+    _, tmp_config = _prepare_isolated_config(tmp_path)
+    runner = CliRunner(mix_stderr=False)
+
+    result = runner.invoke(app, ["export-merged", "--config", str(tmp_config)])
+
+    assert result.exit_code != 0
+    error_text = _combined_output(result)
+    assert (
+        "Unable to determine run context" in error_text
+        or "Cannot locate outputs for run" in error_text
+    ), error_text
+
+
+def test_convert_awq_requires_existing_run(tmp_path):
+    _, tmp_config = _prepare_isolated_config(tmp_path)
+    runner = CliRunner(mix_stderr=False)
+
+    result = runner.invoke(app, ["convert-awq", "--config", str(tmp_config)])
+
+    assert result.exit_code != 0
+    error_text = _combined_output(result)
+    assert (
+        "Unable to determine run context" in error_text
+        or "Cannot locate outputs for run" in error_text
+    ), error_text
+
+
+def test_print_runtime_requires_run_for_post_stage(tmp_path):
+    _, tmp_config = _prepare_isolated_config(tmp_path)
+    runner = CliRunner(mix_stderr=False)
+
+    result = runner.invoke(
+        app,
+        [
+            "print-runtime",
+            "--config",
+            str(tmp_config),
+            "--stage",
+            "convert-awq",
+        ],
+    )
+
+    assert result.exit_code != 0
+    error_text = _combined_output(result)
+    assert (
+        "No existing run detected" in error_text
+        or "Cannot locate outputs for run" in error_text
+    ), error_text

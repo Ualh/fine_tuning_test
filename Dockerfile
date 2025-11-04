@@ -1,5 +1,11 @@
 FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
+LABEL org.opencontainers.image.title="SFT Fine-Tuning Runtime" \
+    org.opencontainers.image.description="CUDA 12.1 environment for the LoRA SFT pipeline" \
+    org.opencontainers.image.vendor="SFT" \
+    org.opencontainers.image.source="https://github.com/Ualh/fine_tuning_test" \
+    org.opencontainers.image.licenses="MIT"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=UTC \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 \

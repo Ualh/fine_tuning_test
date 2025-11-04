@@ -163,8 +163,8 @@
      (Implemented: `sft_trainer.py` logs an INFO when `logging_dir` is not accepted by `TrainingArguments`.)
 - [x] Add a small TrainerCallback (or a simple tensorboard SummaryWriter) that always writes metrics to your canonical tensorboard_dir regardless of whether TrainingArguments accepted logging_dir. 
 
-# v7 naming convention fix
-- [ ] standardize naming convention across all runs, logs, outputs, images, containers via `<model_name>-<dataset_name>-<dataset_size>-runX`
+# v7 ✅ naming convention fix
+- [x] standardize naming convention across all runs, logs, outputs, images, containers via `<model_name>-<dataset_name>-<dataset_size>-runX`
     - [x] Design naming spec & contract — write spec for `<model_name>-<dataset_name>-<dataset_size>-runX`, canonical sources, normalization, run counter rules, examples and pseudocode
     - [x] Add naming config & dataclass — add `naming` section to config.yaml and dataclass fields (normalize, separator, run_counter_scope, run_prefix, legacy_allowed)
     - [x] Implement canonical name builder function — create `src/core/run_naming.py` with `build_run_name(...)`, sanitization, separator handling and deterministic fallback; add unit tests
@@ -174,13 +174,72 @@
     - [x] Docker Compose & service names — update docker-compose.yml to use `RUN_NAME` for `container_name` or labels where appropriate without breaking service references
     - [x] Outputs/logs directory patterns and symlinks — create `outputs/<RUN_NAME>` and `logs/<RUN_NAME>` layout and maintain `outputs/latest`/`logs/latest` pointers; support dry-run preview
     - [x] Update docs and README — update README.md and 1.setup.md to document the convention, overrides
-    - [ ] verify the name images problem, Inconsistent project name source: one command run directly on the host (build) uses the host directory as the project name; later steps call print-runtime inside a container and that produces a project name derived from inside‑container paths. 
-        - [ ] ensure the merge-export step needs a adapter path to work as a standalone command, as otherwise it will create a new ..._runX output which will not have the adapter folder in it
-        - [ ] ensure that the preprocess-sft, convert-awq, eval-sft and serve-vllm commands also work as standalone commands without creating new run folders that do not have the expected content in them.
-        - [ ] modify the commands so that finetune-sft, if provided in the config, runs merge-export, convert-awq, eval-sft and serve-vllm automatically at the end of the finetune step so we avoid the problem of isolated commands that will create new run folders 
+    - [x] verify the name images problem, Inconsistent project name source: one command run directly on the host (build) uses the host directory as the project name; later steps call print-runtime inside a container and that produces a project name derived from inside‑container paths. 
+        - [x] ensure the merge-export step needs a adapter path to work as a standalone command, as otherwise it will create a new ..._runX output which will not have the adapter folder in it
+        - [x] ensure that the preprocess-sft, convert-awq, eval-sft and serve-vllm commands also work as standalone commands without creating new run folders that do not have the expected content in them.
+        - [x] modify the commands so that finetune-sft, if provided in the config, runs merge-export, convert-awq, eval-sft and serve-vllm automatically at the end of the finetune step so we avoid the problem of isolated commands that will create new run folders 
+- [x] confirm run_pipeline.bat build only creates one image per run name, not multiple images with different tags for the same run name
+- [x] confirm run_pipeline.bat up only creates one container per run name, not multiple containers with different names for the same run name
+- [x] confirm that run_pipeline.bat preprocess-sft creates and use only one container, one image and one output folder per run name
+    - [x] prepared/<dataset>_<size>/train.jsonl and val.jsonl exist.
+    - [x] logs/<run>/preprocess/console.log contains the stage logs.
+    - [x] latest.txt updated.
+- [x] confirm that run_pipeline.bat finetune-sft
+    - [x] does not creates and use other containers
+    - [x] does not creates and use other images
+    - [x] does not creates and use other output folders
+    - [x] outputs/<run>/adapter/ exists after training.
+    - [x] logs/<run>/train/console.log shows training summary.
+- [x] confirm that run_pipeline.bat export-merged
+    - [x] does not creates and use other containers
+    - [x] does not creates and use other images
+    - [x] does not creates and use other output folders
+    - [x] outputs/<run>/merged/ contains model files (config.json, model.safetensors, tokenizer, metadata.json).
+- [x] confirm that run_pipeline.bat convert-awq
+    - [x] does not creates and use other containers
+    - [x] does not creates and use other images
+    - [x] does not creates and use other output folders
+    - [x] outputs/<run>/merged_awq/metadata.json exists and has "returncode": 0. 
+    - [x] logs/<run>/convert-awq/container.log has AWQ logs.
+- [x] confirm that run_pipeline.bat eval-sft
+    - [x] does not creates and use other containers
+    - [x] does not creates and use other images
+    - [x] does not creates and use other output folders
+    - [x] outputs/<run>/eval/metrics.json created and contains results.
+- [x] confirm that run_pipeline.bat serve-vllm
+    - [x] does not creates and use other containers
+    - [x] does not creates and use other images
+    - [x] does not creates and use other output folders
+    - [x] vLLM / Open WebUI / Dozzle services are up (check docker compose ps).
+    - [x] vLLM endpoint health check: `python -m src.cli.main smoke-test --endpoint http://localhost:8080 --model Qwen2.5-0.5B-SFT`
+    - [x] Open WebUI accessible at http://localhost:8081.
+    - [x] Dozzle accessible at http://localhost:8082.
+    - [x] Inspect and propose a small fix to the vllm-server service (volume/port) so the model loads and the smoke-test passes.
+- [x] confirm full end to end run with `run_pipeline.bat finetune-sft CONFIG=config.yaml` works
+    - [x] After all stages finish, you have outputs/<run>/adapter, outputs/<run>/merged, outputs/<run>/merged_awq, outputs/<run>/eval.
+    - [x] One stable compose project was used for build/run (no proliferation of per-stage project names).
+    - [x] vLLM serve step failed: container sft-vllm-server-1 exited with OSError: Can't load the configuration of '/models/autoif_qwen25_05b_lora/merged' (missing mount or wrong path). No serve log folder created.
+    - [x] Noted AWQ used only 20 calibration samples vs. requested 128 (recorded in metadata); may impact quantization quality
 
+# v8 docs update
+- [ ] update docs with anything that is outdated or non-consistent
+    - [ ] update README.md
+    - [ ] update docs/1.setup.md
+    - [ ] update docs/2.preprocess-sft.md
+    - [ ] update docs/3.finetune-sft.md
+    - [ ] update docs/4.export-merged.md
+    - [ ] update docs/5.awq-compression.md
+    - [ ] update docs/6.eval-sft.md
+    - [ ] update docs/7.serve-vllm.md
+    - [ ] update docs/8.tensorboard.md
+    - [ ] update guide.md
 
-# v8 small fixes
+# v9 small fixes
+- [ ] add metadata to each log folder. So we have all info about the configs used in detailled for reproducibility purposes and info about the parameters used for each step.
+- [ ] remove sparse_logs if not needed
+- [ ] refractor src/ and scripts/ duplicates. Keep only src/ and remove scripts/. Be sure that the convert-awq still works after the refractoring.
+- [ ] make the ouput of the convert-awq better, less noisy, only important info
+- [ ] add progress bar or something for the user to know the progress of the quantization step, currently it seems to hang for long periods of time without any output
 - [ ] `torch_dtype` is deprecated! Use `dtype` instead!
 - [ ] refractor configs into one folder `configs/` with `smoke.yaml`, `debug.yaml`, `default.yaml`
 - [ ] update all docs to reflect the new config paths
@@ -192,11 +251,11 @@
 - [ ] remove awq/ in docs and merge the file in it into the `5.awq-compression.md` doc.
 - [ ] check if '/ folder can be removed safely, if yes remove it, and verify
 
-# v9
+# v10
 - [ ] clean a bit the docker image and containers, reduce duplication and run only one image per service + one container per run/model
 - [ ] on tensorboard, we observe that each run has the name of the log_vxx/train/tensorboard folder, we should fix that so that we have the model_name-dataset_name-dataset_size_runX
 
-# v7
+# v11
 - [ ] Execute `run_pipeline.bat eval-sft`
 - [ ] Execute `run_pipeline.bat serve-vllm`
 - [ ] Capture & document any fixes/tests for encountered issues

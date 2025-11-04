@@ -23,7 +23,10 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import traceback
+from collections import deque
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 from pathlib import Path
@@ -128,6 +131,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     out = args.out.resolve()
     cfg_dir = cfg_file.parent
 
+    print(f"AWQ runner starting (config={cfg_file}, merged={merged}, out={out})", flush=True)
+
     metadata: Dict[str, Any] = {
         "invoked_at": datetime.utcnow().isoformat() + "Z",
         "merged_path": str(merged),
@@ -204,6 +209,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # GPU availability check (best-effort)
     gpu_requested = bool(args.gpu) or bool(options.get("gpu_enabled", False))
+    print(
+        "GPU requested=%s force=%s retries=%s"
+        % (gpu_requested, args.force, options.get("retries", options.get("awq_retries", 1))),
+        flush=True,
+    )
     if gpu_requested and not args.cpu:
         gpu_ok = False
         # Try torch.cuda first
@@ -233,115 +243,234 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(err, file=sys.stderr)
             return 2
 
-    # Try CLI first
+    # Helpers for streaming subprocess output while capturing tail
+    class TailBuffer:
+        def __init__(self, max_chars: int = 10000):
+            self.max_chars = max_chars
+            self.deq = deque()
+            self.len = 0
+
+        def write(self, s: str) -> None:
+            if not s:
+                return
+            self.deq.append(s)
+            self.len += len(s)
+            # trim
+            while self.len > self.max_chars and self.deq:
+                removed = self.deq.popleft()
+                self.len -= len(removed)
+
+        def getvalue(self) -> str:
+            return "".join(self.deq)
+
+    def stream_subprocess(cmd: List[str], tail_out: TailBuffer, tail_err: TailBuffer) -> int:
+        # Start subprocess and stream its stdout/stderr to real stdout/stderr
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        def _drain(pipe, writer, tee_to=sys.stdout):
+            try:
+                for line in iter(pipe.readline, b""):
+                    try:
+                        chunk = line.decode("utf-8", errors="replace")
+                    except Exception:
+                        chunk = str(line)
+                    writer.write(chunk)
+                    writer.flush()
+                    if tee_to and hasattr(tee_to, "write"):
+                        try:
+                            tee_to.write(chunk)
+                            tee_to.flush()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        t_out = threading.Thread(target=_drain, args=(proc.stdout, tail_out, sys.stdout), daemon=True)
+        t_err = threading.Thread(target=_drain, args=(proc.stderr, tail_err, sys.stderr), daemon=True)
+        t_out.start()
+        t_err.start()
+        # heartbeat while running to reassure the user
+        last = time.time()
+        while proc.poll() is None:
+            time.sleep(5)
+            now = time.time()
+            if now - last >= 60:
+                print(f"AWQ runner heartbeat: still running (pid={proc.pid})", flush=True)
+                last = now
+        t_out.join(timeout=1)
+        t_err.join(timeout=1)
+        return proc.returncode
+
+    # Try CLI first (but stream output so progress is visible)
     exe = None
     for cand in ("llmcompressor", "llm-compressor"):
         if shutil.which(cand):
             exe = cand
             break
 
+    max_retries = int(options.get("retries", options.get("awq_retries", 1)))
+    attempt_index = 0
     if exe:
+        print(f"Using llmcompressor CLI executable: {exe}", flush=True)
         cmd = _build_cli_cmd(merged, out, options)
         metadata["attempts"].append({"type": "cli", "cmd": cmd})
-        try:
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            metadata.update({
-                "returncode": int(proc.returncode),
-                "stdout_tail": _tail(proc.stdout),
-                "stderr_tail": _tail(proc.stderr),
-            })
-            _write_metadata(out, metadata)
-            if proc.returncode != 0:
-                print(f"CLI compression failed (rc={proc.returncode})", file=sys.stderr)
-                return int(proc.returncode) or 2
-            print("AWQ CLI compression finished successfully")
-            return 0
-        except FileNotFoundError:
-            # Race: executable disappeared, fall through to python inline
-            pass
+        tail_out = TailBuffer()
+        tail_err = TailBuffer()
+        for attempt_index in range(1, max_retries + 1):
+            print(f"AWQ CLI attempt {attempt_index}/{max_retries}: {' '.join(cmd)}", flush=True)
+            rc = stream_subprocess(cmd, tail_out, tail_err)
+            metadata.setdefault("cli_attempts", []).append({"attempt": attempt_index, "returncode": int(rc)})
+            if rc == 0:
+                metadata.update({
+                    "returncode": 0,
+                    "stdout_tail": _tail(tail_out.getvalue()),
+                    "stderr_tail": _tail(tail_err.getvalue()),
+                })
+                _write_metadata(out, metadata)
+                print("AWQ CLI compression finished successfully", flush=True)
+                return 0
+            else:
+                print(f"AWQ CLI compression failed (rc={rc}), attempt {attempt_index}", file=sys.stderr, flush=True)
+                if attempt_index < max_retries:
+                    backoff = 5 * attempt_index
+                    print(f"Retrying AWQ CLI after {backoff}s...", flush=True)
+                    time.sleep(backoff)
+        # exhausted
+        metadata.update({
+            "returncode": int(rc),
+            "stdout_tail": _tail(tail_out.getvalue()),
+            "stderr_tail": _tail(tail_err.getvalue()),
+        })
+        _write_metadata(out, metadata)
+        return int(rc) or 2
 
-    # Inline oneshot (in-process) with captured stdout/stderr
+    # Inline oneshot (in-process) with streaming to stdout/stderr so logs are visible
+    print("Falling back to llmcompressor.oneshot inline path", flush=True)
     metadata["attempts"].append({"type": "python-inline", "cmd": [sys.executable, "-c", "llmcompressor.oneshot(...)"]})
-    buf_out = io.StringIO()
-    buf_err = io.StringIO()
+    tail_out = TailBuffer()
+    tail_err = TailBuffer()
     rc = 0
-    try:
-        with redirect_stdout(buf_out), redirect_stderr(buf_err):
-            # Build recipe similar to previous helper logic
-            recipe: List[Any] = []
-            if options.get("use_smoothquant", True):
-                try:
-                    from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
+    # Implement a Tee writer that writes to both original stdout and our tail buffer
+    class TeeWriter:
+        def __init__(self, buf: TailBuffer, orig):
+            self.buf = buf
+            self.orig = orig
 
-                    strength = float(options.get("smoothquant_strength", 0.8))
-                    recipe.append(SmoothQuantModifier(smoothing_strength=strength))
-                except Exception as exc:
-                    print("Warning: cannot import SmoothQuantModifier:", exc, file=sys.stderr)
-
-            method = (options.get("method") or "gptq").lower()
-            targets = _ensure_list(options.get("targets")) or ["Linear"]
-            ignore = _ensure_list(options.get("ignore"))
-
+        def write(self, s):
             try:
-                if method in ("awq", "activation-weighted-quantization"):
-                    from llmcompressor.modifiers.awq import AWQModifier
+                self.buf.write(s)
+            except Exception:
+                pass
+            try:
+                self.orig.write(s)
+            except Exception:
+                pass
 
-                    awq_kwargs: Dict[str, Any] = {
-                        "scheme": options.get("scheme", "W4A16"),
-                        "targets": targets,
-                    }
-                    if ignore:
-                        awq_kwargs["ignore"] = ignore
-                    if options.get("awq_mappings") is not None:
-                        awq_kwargs["mappings"] = options["awq_mappings"]
-                    if options.get("awq_sequential_targets") is not None:
-                        awq_kwargs["sequential_targets"] = options["awq_sequential_targets"]
-                    if options.get("awq_duo_scaling") is not None:
-                        awq_kwargs["duo_scaling"] = bool(options["awq_duo_scaling"])
-                    recipe.append(AWQModifier(**awq_kwargs))
-                elif method in ("gptq", "gptqmodifier"):
-                    from llmcompressor.modifiers.quantization import GPTQModifier
+        def flush(self):
+            try:
+                self.orig.flush()
+            except Exception:
+                pass
 
-                    scheme = options.get("scheme", "W8A8")
-                    recipe.append(GPTQModifier(scheme=scheme, targets=targets))
-                elif method in ("rtn", "round-to-nearest"):
-                    from llmcompressor.modifiers.quantization import RoundToNearestModifier
+    try:
+        # Build recipe similar to previous helper logic
+        recipe: List[Any] = []
+        if options.get("use_smoothquant", True):
+            try:
+                from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 
-                    scheme = options.get("scheme", "W8A8")
-                    recipe.append(RoundToNearestModifier(scheme=scheme))
-                else:
-                    if method:
-                        print(f"Warning: unsupported AWQ method '{method}', proceeding without an explicit quantization modifier", file=sys.stderr)
+                strength = float(options.get("smoothquant_strength", 0.8))
+                recipe.append(SmoothQuantModifier(smoothing_strength=strength))
             except Exception as exc:
-                print("Warning: cannot import quantization modifiers:", exc, file=sys.stderr)
+                print("Warning: cannot import SmoothQuantModifier:", exc, file=sys.stderr)
 
-            from llmcompressor import oneshot
+        method = (options.get("method") or "gptq").lower()
+        targets = _ensure_list(options.get("targets")) or ["Linear"]
+        ignore = _ensure_list(options.get("ignore"))
 
-            dataset_arg: Any = options.get("dataset")
-            if calib_dataset is not None:
-                dataset_arg = calib_dataset
+        try:
+            if method in ("awq", "activation-weighted-quantization"):
+                from llmcompressor.modifiers.awq import AWQModifier
 
-            call_kwargs: Dict[str, Any] = {"recipe": recipe, "output_dir": str(out)}
-            if options.get("num_calibration_samples"):
-                call_kwargs["num_calibration_samples"] = int(options.get("num_calibration_samples"))
-            if options.get("max_seq_length"):
-                call_kwargs["max_seq_length"] = int(options.get("max_seq_length"))
-            if options.get("dataset_path"):
-                call_kwargs["dataset_path"] = options.get("dataset_path")
-            if options.get("splits"):
-                call_kwargs["splits"] = options.get("splits")
-            if options.get("text_column"):
-                call_kwargs["text_column"] = options.get("text_column")
+                awq_kwargs: Dict[str, Any] = {
+                    "scheme": options.get("scheme", "W4A16"),
+                    "targets": targets,
+                }
+                if ignore:
+                    awq_kwargs["ignore"] = ignore
+                if options.get("awq_mappings") is not None:
+                    awq_kwargs["mappings"] = options["awq_mappings"]
+                if options.get("awq_sequential_targets") is not None:
+                    awq_kwargs["sequential_targets"] = options["awq_sequential_targets"]
+                if options.get("awq_duo_scaling") is not None:
+                    awq_kwargs["duo_scaling"] = bool(options["awq_duo_scaling"])
+                recipe.append(AWQModifier(**awq_kwargs))
+            elif method in ("gptq", "gptqmodifier"):
+                from llmcompressor.modifiers.quantization import GPTQModifier
 
-            oneshot(model=str(merged), dataset=dataset_arg, **call_kwargs)
+                scheme = options.get("scheme", "W8A8")
+                recipe.append(GPTQModifier(scheme=scheme, targets=targets))
+            elif method in ("rtn", "round-to-nearest"):
+                from llmcompressor.modifiers.quantization import RoundToNearestModifier
+
+                scheme = options.get("scheme", "W8A8")
+                recipe.append(RoundToNearestModifier(scheme=scheme))
+            else:
+                if method:
+                    print(
+                        f"Warning: unsupported AWQ method '{method}', proceeding without an explicit quantization modifier",
+                        file=sys.stderr,
+                    )
+        except Exception as exc:
+            print("Warning: cannot import quantization modifiers:", exc, file=sys.stderr)
+
+        from llmcompressor import oneshot
+
+        dataset_arg: Any = options.get("dataset")
+        if calib_dataset is not None:
+            dataset_arg = calib_dataset
+
+        call_kwargs: Dict[str, Any] = {"recipe": recipe, "output_dir": str(out)}
+        if options.get("num_calibration_samples"):
+            call_kwargs["num_calibration_samples"] = int(options.get("num_calibration_samples"))
+        if options.get("max_seq_length"):
+            call_kwargs["max_seq_length"] = int(options.get("max_seq_length"))
+        if options.get("dataset_path"):
+            call_kwargs["dataset_path"] = options.get("dataset_path")
+        if options.get("splits"):
+            call_kwargs["splits"] = options.get("splits")
+        if options.get("text_column"):
+            call_kwargs["text_column"] = options.get("text_column")
+
+        # Run oneshot with stdout/stderr teed to both real stdout and our tail buffers
+        orig_out = sys.stdout
+        orig_err = sys.stderr
+        sys.stdout = TeeWriter(tail_out, orig_out)
+        sys.stderr = TeeWriter(tail_err, orig_err)
+        try:
+            for attempt_index in range(1, max_retries + 1):
+                print(f"AWQ inline attempt {attempt_index}/{max_retries}", flush=True)
+                try:
+                    oneshot(model=str(merged), dataset=dataset_arg, **call_kwargs)
+                    rc = 0
+                    break
+                except Exception:
+                    rc = 2
+                    traceback.print_exc(file=sys.stderr)
+                    if attempt_index < max_retries:
+                        backoff = 5 * attempt_index
+                        print(f"Retrying AWQ inline after {backoff}s...", flush=True)
+                        time.sleep(backoff)
+        finally:
+            sys.stdout = orig_out
+            sys.stderr = orig_err
     except Exception:
         rc = 2
-        traceback.print_exc(file=buf_err)
+        traceback.print_exc(file=sys.stderr)
 
-    stdout_val = buf_out.getvalue()
-    stderr_val = buf_err.getvalue()
-    metadata.update({"returncode": int(rc), "stdout_tail": _tail(stdout_val), "stderr_tail": _tail(stderr_val)})
+    metadata.update({"returncode": int(rc), "stdout_tail": _tail(tail_out.getvalue()), "stderr_tail": _tail(tail_err.getvalue())})
     _write_metadata(out, metadata)
+    print(f"Metadata written to {out / 'metadata.json'}", flush=True)
 
     if rc != 0:
         print("AWQ python oneshot failed; see metadata.json for details", file=sys.stderr)

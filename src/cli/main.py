@@ -6,12 +6,13 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
-from typing import Any, Dict, Optional
-
-import typer
 import shutil
 import subprocess
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence
+
+import typer
 
 from ..core.config import ConfigLoader, PipelineConfig
 from ..core.io_utils import ensure_dir, write_text
@@ -32,6 +33,8 @@ from ..training.lora_merge import LoraMerger
 from ..eval.evaluator import Evaluator
 from ..serve.vllm_client import VLLMClient
 
+POST_FINETUNE_TARGETS = {"export-merged", "convert-awq", "eval-sft", "serve-vllm"}
+
 app = typer.Typer(add_completion=False, help="Fine-tuning pipeline for Qwen2.5 0.5B")
 
 
@@ -50,8 +53,6 @@ def _level_to_int(level: str) -> int:
         raise typer.BadParameter(f"Unknown logging level: {level}")
     return value
 
-
- 
 
 
 def _default_preprocess_dir(cfg: PipelineConfig) -> Path:
@@ -92,6 +93,59 @@ def _compute_run_info(
     if update_env:
         os.environ.update(run_info.to_env())
     return run_info
+
+
+def _normalize_stage_name(stage: Optional[str]) -> str:
+    return (stage or "").strip().lower()
+
+
+def _read_latest_run_name(cfg: PipelineConfig) -> Optional[str]:
+    pointer = cfg.paths.run_metadata_file
+    try:
+        raw = pointer.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if not raw:
+        return None
+    return Path(raw).name
+
+
+def _infer_run_name_from_outputs(cfg: PipelineConfig, artifacts: Sequence[Optional[Path]]) -> Optional[str]:
+    outputs_root = cfg.paths.outputs_dir
+    try:
+        outputs_root_resolved = outputs_root.resolve(strict=False)
+    except RuntimeError:  # pragma: no cover - defensive
+        outputs_root_resolved = outputs_root
+
+    for artifact in artifacts:
+        if artifact is None:
+            continue
+        expanded = Path(artifact).expanduser()
+        try:
+            resolved = expanded.resolve(strict=False)
+        except RuntimeError:  # pragma: no cover - defensive
+            resolved = expanded
+        try:
+            relative = resolved.relative_to(outputs_root_resolved)
+        except ValueError:
+            continue
+        parts = relative.parts
+        if parts:
+            return parts[0]
+    return None
+
+
+def _require_existing_outputs(cfg: PipelineConfig, run_name: str) -> None:
+    outputs_root = cfg.paths.outputs_dir / run_name
+    if outputs_root.exists():
+        return
+    raise typer.BadParameter(
+        "Cannot locate outputs for run '{run_name}'. Provide --run-name or pass explicit paths to reuse an existing run.".format(
+            run_name=run_name
+        )
+    )
 
 
 @app.command("run-name-preview")
@@ -154,7 +208,18 @@ def convert_awq(
     disable_ssl_verification()
     cfg = _load_config(config)
 
-    run_info = _compute_run_info(cfg, run_name=run_name, run_index=run_index)
+    merged_hint = merged_dir if merged_dir is not None else None
+    output_hint = output_dir if output_dir is not None else None
+    run_name_override = run_name or _infer_run_name_from_outputs(cfg, [merged_hint, output_hint])
+    if run_name_override is None:
+        run_name_override = _read_latest_run_name(cfg)
+    if run_name_override is None:
+        raise typer.BadParameter(
+            "Unable to determine run context. Provide --run-name, --merged-dir or execute finetune-sft first."
+        )
+
+    run_info = _compute_run_info(cfg, run_name=run_name_override, run_index=run_index)
+    _require_existing_outputs(cfg, run_info.name)
     outputs_root, _ = _ensure_run_dirs(cfg, run_info)
 
     run_manager = RunManager(cfg, run_info=run_info)
@@ -166,8 +231,14 @@ def convert_awq(
         file_level=_level_to_int(cfg.logging.file_level),
     )
 
+    logger.info("Starting AWQ conversion for run %s", run_info.name)
+    logger.debug("Runtime resolved outputs dir: %s", outputs_root)
+
     merged_resolved = Path(merged_dir or (outputs_root / "merged"))
     out_resolved = Path(output_dir or (outputs_root / "merged_awq"))
+
+    logger.info("Merged directory: %s", merged_resolved)
+    logger.info("Target AWQ output directory: %s", out_resolved)
 
     # Check config AWQ block (loader supports legacy `llm_compressor` key)
     awq_cfg = getattr(cfg, "awq_conversion", None)
@@ -185,8 +256,14 @@ def convert_awq(
     console_log = run_dir / "console.log"
     try:
         with tee_std_streams(console_log):
+            start_time = time.perf_counter()
+            docker_exe = shutil.which("docker")
+            if docker_exe:
+                logger.info("Docker binary detected: %s", docker_exe)
+            else:
+                logger.info("Docker binary not found on PATH; will attempt local fallback")
             # Prefer Docker sidecar if docker available
-            if shutil.which("docker"):
+            if docker_exe:
                 # Build container-invocation command using workspace-relative paths
                 cfg_rel = _rel_to_project(Path(config), cfg.project_root, label="config")
                 merged_rel = _rel_to_project(merged_resolved, cfg.project_root, label="Merged directory")
@@ -218,10 +295,11 @@ def convert_awq(
                 if proc.returncode != 0:
                     logger.error("awq-runner sidecar failed (rc=%d)", proc.returncode)
                     raise typer.Exit(code=proc.returncode)
-                logger.info("awq-runner sidecar finished successfully")
+                elapsed = time.perf_counter() - start_time
+                logger.info("awq-runner sidecar finished successfully in %.1fs", elapsed)
             else:
                 # No Docker: try to run the runner locally
-                logger.info("Docker not found; attempting local AWQ runner invocation.")
+                logger.info("Attempting local AWQ runner invocation (Docker unavailable).")
                 try:
                     from src.training.awq_runner import main as awq_main
 
@@ -237,11 +315,13 @@ def convert_awq(
                         args.append("--force")
                     if gpu_enabled:
                         args.append("--gpu")
+                    logger.info("Calling inline awq_runner with args: %s", " ".join(args))
                     rc = awq_main(args)
                     if rc != 0:
                         logger.error("Local awq runner failed (rc=%d)", rc)
                         raise typer.Exit(code=rc)
-                    logger.info("Local awq runner finished successfully")
+                    elapsed = time.perf_counter() - start_time
+                    logger.info("Local awq runner finished successfully in %.1fs", elapsed)
                 except Exception as exc:
                     log_exception_with_locals(logger, "Local awq runner failed", exc)
                     raise
@@ -471,7 +551,19 @@ def export_merged(
     if base_model:
         cfg.train.base_model = base_model
 
-    run_info = _compute_run_info(cfg, run_name=run_name, run_index=run_index)
+    adapter_hint = adapter_dir if adapter_dir is not None else None
+    output_hint = output_dir if output_dir is not None else None
+
+    run_name_override = run_name or _infer_run_name_from_outputs(cfg, [adapter_hint, output_hint])
+    if run_name_override is None:
+        run_name_override = _read_latest_run_name(cfg)
+    if run_name_override is None:
+        raise typer.BadParameter(
+            "Unable to determine run context. Provide --run-name, --adapter-dir, or execute finetune-sft first."
+        )
+
+    run_info = _compute_run_info(cfg, run_name=run_name_override, run_index=run_index)
+    _require_existing_outputs(cfg, run_info.name)
     outputs_root, _ = _ensure_run_dirs(cfg, run_info)
 
     run_manager = RunManager(cfg, run_info=run_info)
@@ -550,7 +642,18 @@ def eval_sft(
     if cutoff_len is not None:
         cfg.eval.cutoff_len = cutoff_len
 
-    run_info = _compute_run_info(cfg, run_name=run_name, run_index=run_index)
+    model_hint = model_dir if model_dir is not None else None
+    output_hint = output_dir if output_dir is not None else None
+    run_name_override = run_name or _infer_run_name_from_outputs(cfg, [model_hint, output_hint])
+    if run_name_override is None:
+        run_name_override = _read_latest_run_name(cfg)
+    if run_name_override is None:
+        raise typer.BadParameter(
+            "Unable to determine run context. Provide --run-name, --model-dir or execute finetune-sft first."
+        )
+
+    run_info = _compute_run_info(cfg, run_name=run_name_override, run_index=run_index)
+    _require_existing_outputs(cfg, run_info.name)
     outputs_root, _ = _ensure_run_dirs(cfg, run_info)
 
     run_manager = RunManager(cfg, run_info=run_info)
@@ -586,7 +689,7 @@ def eval_sft(
 
 
 
-def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
+def _build_runtime_metadata(cfg: PipelineConfig, *, stage: Optional[str] = None) -> Dict[str, str]:
     if not cfg.preprocess.dataset_name:
         raise typer.BadParameter("preprocess.dataset_name must be set in config.yaml.")
     sample_size = cfg.preprocess.sample_size
@@ -599,25 +702,43 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         raise typer.BadParameter("serve.served_model_name must be set in config.yaml.")
 
     project_root = cfg.project_root
-    run_info = _compute_run_info(cfg)
+    stage_normalized = _normalize_stage_name(stage)
+
+    explicit_env_run = os.environ.get("RUN_NAME") or os.environ.get("FORCE_RUN_NAME")
+    run_name_hint: Optional[str] = None
+    require_existing = stage_normalized in POST_FINETUNE_TARGETS
+
+    if explicit_env_run:
+        run_name_hint = explicit_env_run
+    elif require_existing:
+        run_name_hint = _read_latest_run_name(cfg)
+        if run_name_hint is None:
+            raise typer.BadParameter(
+                "No existing run detected. Provide --run-name/--run-index or run finetune-sft before executing '{stage}'.".format(
+                    stage=stage_normalized or "this stage",
+                )
+            )
+
+    run_info = _compute_run_info(cfg, run_name=run_name_hint)
+
+    if require_existing:
+        _require_existing_outputs(cfg, run_info.name)
+
     outputs_root, logs_root = _ensure_run_dirs(cfg, run_info)
 
     # Use a stable compose project name so docker compose containers/images are
-    # not recreated per run. Prefer the repository folder name (project root)
-    # which is stable across runs. This prevents image/container proliferation
-    # when launching multiple runs.
+    # not recreated per run. Default to "SFT" but allow callers to override via
+    # HOST_COMPOSE_PROJECT, COMPOSE_PROJECT, or COMPOSE_PROJECT_NAME.
+    compose_env = os.environ.get("COMPOSE_PROJECT") or os.environ.get("COMPOSE_PROJECT_NAME")
     host_compose = os.environ.get("HOST_COMPOSE_PROJECT")
-    if host_compose:
-        compose_project = str(host_compose).lower()
-    else:
-        compose_project = cfg.project_root.name.lower() if cfg.project_root and cfg.project_root.name else "pipeline"
-    if len(compose_project) > 62:
-        compose_project = compose_project[:62].rstrip("-")
+    compose_project = (host_compose or compose_env or "sft").strip()
     if not compose_project:
-        compose_project = "pipeline"
-    if not compose_project[0].isalpha():
-        compose_project = f"proj-{compose_project}"
-        compose_project = compose_project[:62].rstrip("-") or "pipeline"
+        compose_project = "sft"
+    compose_project = re.sub(r"[^A-Za-z0-9_-]+", "-", compose_project).lower()
+    compose_project = compose_project[:62].rstrip("-") or "sft"
+    if not compose_project[0].isalnum():
+        compose_project = f"sft-{compose_project}"
+        compose_project = compose_project[:62].rstrip("-") or "sft"
 
     preprocess_dir = _default_preprocess_dir(cfg)
     adapter_dir = outputs_root / "adapter"
@@ -635,11 +756,46 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
     # or explicitly set to the string "none" (case-insensitive), use the
     # merged model directory instead. Otherwise normalize backslashes to
     # forward slashes and strip any leading/trailing slashes.
+    awq_suffix = "awq"
+    if cfg.awq_conversion and cfg.awq_conversion.output_suffix:
+        awq_suffix = str(cfg.awq_conversion.output_suffix)
+    awq_dir = merged_dir.with_name(f"{merged_dir.name}_{awq_suffix}")
+
     raw_served = cfg.serve.served_model_relpath
-    if not raw_served or (isinstance(raw_served, str) and raw_served.strip().lower() == "none"):
-        served_rel = merged_rel.as_posix()
+    prefer_awq = bool(getattr(cfg.serve, "prefer_awq", True))
+
+    served_dir = merged_dir
+    served_source = "merged"
+
+    if raw_served and not (isinstance(raw_served, str) and raw_served.strip().lower() == "none"):
+        override_str = str(raw_served).replace("\\", "/").strip("/")
+        override_path = Path(override_str)
+        if override_path.is_absolute():
+            served_dir = override_path
+        else:
+            parts = [part for part in override_path.parts if part and part not in {".", ".."}]
+            if parts and parts[0].lower() == "outputs":
+                parts = parts[1:]
+            served_dir = cfg.paths.outputs_dir.joinpath(*parts) if parts else cfg.paths.outputs_dir
+        served_source = "override"
     else:
-        served_rel = str(raw_served).replace("\\", "/").strip("/")
+        if prefer_awq and awq_dir.exists():
+            served_dir = awq_dir
+            served_source = "awq"
+        else:
+            served_dir = merged_dir
+            served_source = "merged"
+
+    try:
+        served_rel_candidate = served_dir.relative_to(cfg.paths.outputs_dir).as_posix()
+        served_rel = served_rel_candidate.strip("/") or ""
+    except ValueError:
+        try:
+            served_rel = _rel_to_project(served_dir, project_root, label="Served model directory").as_posix()
+        except typer.BadParameter:
+            served_rel = served_dir.as_posix().replace("\\", "/")
+
+    served_name = getattr(cfg.serve, "model_name", None) or cfg.serve.served_model_name
 
     runtime: Dict[str, str] = {
         "PROJECT_ROOT": str(project_root),
@@ -656,9 +812,9 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         "MERGED_DIR_CONTAINER": f"/app/{merged_rel.as_posix()}",
         "EVAL_DIR": eval_rel.as_posix(),
         "EVAL_DIR_CONTAINER": f"/app/{eval_rel.as_posix()}",
-        "SERVED_MODEL_RELPATH": served_rel,
-        "SERVED_MODEL_PATH": f"/models/{served_rel}",
-        "SERVED_MODEL_NAME": cfg.serve.served_model_name,
+    "SERVED_MODEL_RELPATH": served_rel,
+    "SERVED_MODEL_PATH": f"/models/{served_rel}" if served_rel else "/models",
+    "SERVED_MODEL_NAME": served_name,
         "SERVED_MODEL_MAX_LEN": str(cfg.serve.max_model_len),
         "SERVE_PORT": str(cfg.serve.port),
         "SERVE_HOST": cfg.serve.host,
@@ -677,7 +833,17 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
         "RUN_LOGS_DIR": logs_rel.as_posix(),
         "RUN_LOGS_DIR_CONTAINER": f"/app/{logs_rel.as_posix()}",
         "RUN_DIR_NAME": run_info.name,
+        "POST_FINETUNE_TARGETS": " ".join(cfg.orchestration.post_finetune or []),
     }
+    # Host path for the served model directory so docker-compose can mount it
+    # directly into the vLLM container at the expected `/models/<served_rel>`.
+    # Use forward-slash notation to keep compose interpolation portable.
+    try:
+        served_host_path = served_dir.resolve()
+    except Exception:
+        served_host_path = served_dir
+    runtime["SERVED_MODEL_PATH_HOST"] = served_host_path.as_posix()
+    runtime["SERVED_MODEL_SOURCE"] = served_source
     runtime.update(run_info.to_env())
     return runtime
 
@@ -686,9 +852,10 @@ def _build_runtime_metadata(cfg: PipelineConfig) -> Dict[str, str]:
 def print_runtime(
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
     format: str = typer.Option("env", "--format", "-f", help="Output format: env or json."),
+    stage: Optional[str] = typer.Option(None, "--stage", help="Pipeline stage requesting metadata."),
 ) -> None:
     cfg = _load_config(config)
-    runtime = _build_runtime_metadata(cfg)
+    runtime = _build_runtime_metadata(cfg, stage=stage)
 
     if format.lower() == "env":
         for key, value in runtime.items():

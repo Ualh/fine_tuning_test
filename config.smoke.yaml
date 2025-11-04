@@ -66,7 +66,9 @@ serve:
   port: 8080
   max_model_len: 512
   served_model_name: Qwen2.5-0.5B-SFT-SMOKE
-  served_model_relpath: alpaca_n32_Qwen2.5-0.5B/merged
+  prefer_awq: true
+  served_model_relpath: null
+  model_name: null
   resume_from: null
 
 logging:
@@ -74,3 +76,10 @@ logging:
   file_level: DEBUG
   tqdm_refresh_rate: 1.0
   debug_pipeline: false
+
+orchestration:
+  post_finetune:
+    - export-merged
+    - convert-awq
+    - eval-sft
+    - serve-vllm

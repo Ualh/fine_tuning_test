@@ -1,5 +1,8 @@
+name: ${COMPOSE_PROJECT_NAME:-SFT}
+
 services:
   sft:
+    image: ${SFT_IMAGE_NS:-sft}/sft:${SFT_IMAGE_TAG:-local}
     env_file:
       - .env
     build:
@@ -42,8 +45,11 @@ services:
     labels:
       org.finetuning.run: "${RUN_NAME:-unset}"
       org.finetuning.role: "sft"
+      org.opencontainers.image.title: "SFT fine-tuning runtime"
+      org.opencontainers.image.vendor: "SFT"
 
   awq-runner:
+    image: ${SFT_IMAGE_NS:-sft}/awq-runner:${SFT_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: Dockerfile.awq-runner
@@ -69,6 +75,8 @@ services:
     labels:
       org.finetuning.run: "${RUN_NAME:-unset}"
       org.finetuning.role: "awq-runner"
+      org.opencontainers.image.title: "SFT AWQ sidecar"
+      org.opencontainers.image.vendor: "SFT"
 
   vllm-server:
     image: vllm/vllm-openai:latest
@@ -78,6 +86,7 @@ services:
     ipc: host
     environment:
       VLLM_CACHE_ROOT: /models/cache
+      SERVED_MODEL_RELPATH: ${SERVED_MODEL_RELPATH:-_unset}
       SERVED_MODEL_PATH: ${SERVED_MODEL_PATH:-/models/_unset}
       SERVED_MODEL_NAME: ${SERVED_MODEL_NAME:-Qwen2.5-0.5B-SFT}
       SERVED_MODEL_MAX_LEN: ${SERVED_MODEL_MAX_LEN:-2048}
@@ -143,6 +152,7 @@ services:
       org.finetuning.role: "open-webui"
 
   tensorboard:
+    image: ${SFT_IMAGE_NS:-sft}/tensorboard:${SFT_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: Dockerfile
@@ -167,3 +177,5 @@ services:
     labels:
       org.finetuning.run: "${RUN_NAME:-unset}"
       org.finetuning.role: "tensorboard"
+      org.opencontainers.image.title: "SFT tensorboard"
+      org.opencontainers.image.vendor: "SFT"

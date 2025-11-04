@@ -40,15 +40,13 @@ Runtime directories (ignored by git):
 3. Build the Docker image: `run_pipeline.bat build`
 4. Start the training container: `run_pipeline.bat up`
 5. Execute stages:
-   - `run_pipeline.bat preprocess-sft`
-   - `run_pipeline.bat finetune-sft`
-   - `run_pipeline.bat export-merged`
-   - `run_pipeline.bat eval-sft`
-   - `run_pipeline.bat serve-vllm`
+  - `run_pipeline.bat preprocess-sft`
+  - `run_pipeline.bat finetune-sft`
+    - By default the pipeline will automatically chain: export-merged → convert-awq → eval-sft → serve-vllm using the same run directory. You can tune this in `orchestration.post_finetune`.
 6. Smoke-test the served model:
    - `python -m src.cli.main smoke-test --prompt "Résume AC215 en trois points."`
 
-Each stage now reads dataset/model/paths from `config.yaml`; edit the YAML once and rerun the desired commands.
+Each stage now reads dataset/model/paths from `config.yaml`; edit the YAML once and rerun the desired commands. Standalone stages (export-merged, convert-awq, eval-sft, serve-vllm) reuse an existing run; they will refuse to create a fresh run without the required artefacts. Pass `--run-name`, or explicit directories (e.g., `--adapter-dir`, `--merged-dir`), or run `finetune-sft` first.
 Inspect the resolved paths and docker-compose project name anytime (Docker-first):
 
 ```powershell
@@ -75,6 +73,17 @@ run_pipeline.bat run-name-preview FORCE_RUN_NAME=qwen2-7b-alpaca-full-run42
 
 All overrides propagate to the runtime probe (`print-runtime`) and to downstream container commands automatically.
 
+### Orchestration (post-finetune)
+
+- `config.yaml` supports `orchestration.post_finetune` with a list of stage names to run after successful training. Default examples in this repo include:
+  - `export-merged`, `convert-awq`, `eval-sft`, `serve-vllm`
+- The wrapper executes these in order inside the same run folder so artefacts are chained correctly and no stray runs are created.
+
+- The wrapper, CLI, and `docker-compose.yml` now default to the `sft` compose project (lowercase to satisfy Docker rules). Docker Desktop shows the stack as **sft** (displayed as “SFT” in docs/UI), so you no longer need to export `HOST_COMPOSE_PROJECT` manually for standard runs.
+- To change the project name, set `HOST_COMPOSE_PROJECT=<name>` (or `COMPOSE_PROJECT_NAME`) before invoking the wrapper. The pipeline will adopt the override everywhere, including the runtime probe and downstream container calls, and still sanitize the value for Docker.
+- Built images are tagged under the shared namespace `${SFT_IMAGE_NS:-sft}/…` so related artefacts sort together in Docker Desktop and other registries. Override the namespace or tag by exporting `SFT_IMAGE_NS` / `SFT_IMAGE_TAG` if you need custom naming.
+- After adopting the new naming, feel free to prune any historical tags such as `app-sft` or `fine_tuning_test-sft` once no containers depend on them (`docker rmi <tag>`).
+
 ## Configuration
 
 All tunables live in `config.yaml`:
@@ -84,7 +93,7 @@ All tunables live in `config.yaml`:
 - `train`: LoRA hyper-parameters, scheduler, precision flags, logging cadence, resume options.
 - `export`: merged checkpoint behaviour.
 - `eval`: prompt suite plus generation parameters.
-- `serve`: vLLM host/port/max context, served model name, and `served_model_relpath` (relative to `outputs/`).
+- `serve`: vLLM host/port/max context plus the default served name, AWQ preference (`prefer_awq`), and optional overrides (`served_model_relpath`, `model_name`).
 - `logging`: console/file log levels and tqdm refresh cadence.
 
 CLI options mirror these fields so you can override values without editing the YAML.
@@ -111,7 +120,7 @@ After a successful run inspect:
 
 Notes:
 
-- The runner requires the merged model directory to exist (`outputs/.../merged`). If you see "Merged model path not found", run `run_pipeline.bat export-merged` first.
+- The runner requires the merged model directory to exist (`outputs/.../merged`). If you see "Merged model path not found", run `run_pipeline.bat export-merged` first. When run after `finetune-sft` with orchestration enabled, this step is executed automatically in the same run directory.
 - If `llmcompressor` console script is missing in the container, the runner will use the Python entrypoint which is supported in tested setups.
 
 
@@ -218,19 +227,20 @@ Logging behaviour (what you see vs what is recorded)
 
 ## vLLM serving
 
-- Point `serve.served_model_relpath` in `config.yaml` to the merged folder under `outputs/`; the helper
-  expands it to `/models/...` inside the container. If the config value is falsy or explicitly set to the string `"none"` (case-insensitive), the CLI will default to the merged output directory for the
-  project (the same directory produced by `export-merged`). When you provide a custom relpath it will be   normalized (backslashes -> forward slashes and leading/trailing slashes removed) before use. The runtime probe emits two variables you can inspect or inject into compose:
-  - `SERVED_MODEL_RELPATH`: the chosen relative path under the project (normalized)
-  - `SERVED_MODEL_PATH`: the container path, i.e. `/models/<SERVED_MODEL_RELPATH>`
-
-  Note: `SERVED_MODEL_NAME` is preserved exactly as supplied in `config.yaml`. If you omit an explicit
-  `served_model_name` you will need to provide the model name manually when running the smoke-test or
-  when pointing clients at the vLLM server.
-- `run_pipeline.bat serve-vllm` injects `SERVED_MODEL_PATH`, `SERVED_MODEL_NAME`, and
-  `SERVED_MODEL_MAX_LEN` before calling `docker compose` with the dynamic project name.
-- The `vllm-server` service still mounts `\\pc-27327\D\LLM`; copy or symlink your merged model there if
-  you want to serve from the shared drive instead of local outputs.
+- By default the runtime selects `<run>/merged_awq` when AWQ conversion succeeds. This behaviour is
+  controlled by `serve.prefer_awq` (default `true`). When the directory is missing or the flag is `false`,
+  the CLI falls back to `<run>/merged`.
+- Override the directory by setting `serve.served_model_relpath` to a path relative to `outputs/` (for
+  example `my-run/merged_awq`). Set it to `null` to keep the automatic selection. Use `serve.model_name`
+  if you need the vLLM endpoint to announce a specific name while retaining a different default locally.
+- The runtime probe emits:
+  - `SERVED_MODEL_RELPATH`: relative to `outputs/` when possible (e.g. `run-x/merged_awq`).
+  - `SERVED_MODEL_PATH`: `/models/<SERVED_MODEL_RELPATH>` when the path is under `outputs/`.
+  - `SERVED_MODEL_SOURCE`: `awq`, `merged`, or `override` to simplify debugging.
+- `run_pipeline.bat serve-vllm` exports these variables before calling `docker compose` with the resolved
+  project name.
+- The `vllm-server` service now mounts only `./outputs:/models`, mirroring the runtime expectation that
+  served models live under `outputs/`.
 - Smoke-test via the bundled helper or any OpenAI-compatible client:
 
 ```python
