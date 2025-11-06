@@ -26,7 +26,7 @@ RUN apt-get update \
 
 # Install runtime Python deps
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir llmcompressor==${LLMCOMPRESSOR_VERSION} PyYAML
+    && pip install --no-cache-dir llmcompressor==${LLMCOMPRESSOR_VERSION} PyYAML typer[all]==0.12.3 rich==13.7.1
 
 COPY src /workspace/src
 
@@ -52,6 +52,6 @@ RUN apt-get update \
 
 # Upgrade pip and install GPU-friendly packages where appropriate
 RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip3 install --no-cache-dir llmcompressor==${LLMCOMPRESSOR_VERSION} PyYAML
+    && pip3 install --no-cache-dir llmcompressor==${LLMCOMPRESSOR_VERSION} PyYAML typer[all]==0.12.3 rich==13.7.1
 
 COPY src /workspace/src

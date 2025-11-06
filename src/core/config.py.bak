@@ -1,6 +1,4 @@
-"""Configuration dataclasses for the DRG fine-tuning pipeline.
-Stage: shared config loader — consumed by Typer CLI entry points (see src/cli/main.py).
-"""
+"""Configuration primitives for the fine-tuning pipeline."""
 
 from __future__ import annotations
 
@@ -17,11 +15,6 @@ from .io_utils import expand_path, parse_comma_separated
 
 @dataclass
 class PathsConfig:
-    """Locate canonical directories used by the pipeline.
-    - Inputs: values under ``config.paths`` plus environment overrides such as ``HF_HOME``.
-    - Outputs: absolute paths consumed by run managers, log writers, and Docker mounts.
-    """
-
     data_root: Path
     prepared_dir: Path
     outputs_dir: Path
@@ -33,10 +26,7 @@ class PathsConfig:
 
 @dataclass
 class OracleClientConfig:
-    """Connection settings that drive Oracle enrichment during preprocessing.
-    - Inputs: ``config.preprocess.real_data.oracle`` values and matching environment variables.
-    - Side effects: governs whether Oracle lookups run and how credentials are resolved.
-    """
+    """Connection settings for Oracle enrichment during preprocessing."""
 
     enabled: bool = False
     dsn: Optional[str] = None
@@ -49,16 +39,11 @@ class OracleClientConfig:
     debug_sql_dir: Optional[Path] = None
     instant_client_dir: Optional[Path] = None
     tns_admin: Optional[Path] = None
-    stub_mode: bool = False
-    stub_data_path: Optional[Path] = None
 
 
 @dataclass
 class RealDataConfig:
-    """Control how raw hospital letters become DRG classification splits.
-    - Inputs: ``config.preprocess.real_data`` block plus derived dataset stub.
-    - Outputs: resolved directories, filtering thresholds, and Oracle client binding.
-    """
+    """Configuration for preprocessing raw hospital letters into classification splits."""
 
     raw_dir: Optional[Path] = None
     sample_dir: Optional[Path] = None
@@ -80,11 +65,6 @@ class RealDataConfig:
 
 @dataclass
 class PreprocessConfig:
-    """Describe preprocessing behaviour for both Hugging Face and DRG modes.
-    - Inputs: top-level ``config.preprocess`` section from YAML.
-    - Outputs: normalised options passed into preprocessing runners.
-    """
-
     dataset_name: str
     sample_size: Optional[int]
     filter_langs: List[str]
@@ -100,12 +80,6 @@ class PreprocessConfig:
 
 @dataclass
 class TrainConfig:
-    """Hyper-parameters for the supervised fine-tuning stage.
-    - Inputs: ``config.train`` fields and optional CLI overrides.
-    - Outputs: arguments for either TRL SFT fine-tuning or DRG classification training.
-    - Tracks classification extras such as loss shape, 4-bit quantisation, and oversampling knobs.
-    """
-
     base_model: str
     cutoff_len: int
     batch_size: int
@@ -129,35 +103,16 @@ class TrainConfig:
     resume_from: Optional[str]
     report_to: List[str]
     logging_dir: Optional[Path]
-    eval_batch_size: Optional[int]
-    loss_type: str
-    focal_gamma: float
-    label_smoothing: float
-    use_oversampling: bool
-    metric_for_best_model: str
-    greater_is_better: bool
-    abstain_tau: Optional[float]
-    load_in_4bit: bool
 
 
 @dataclass
 class ExportConfig:
-    """Control how adapters are materialised after fine-tuning.
-    - Inputs: ``config.export`` options.
-    - Outputs: behaviour for ``export-merged`` and downstream consumers.
-    """
-
     include_adapter_weights: bool
     resume_from: Optional[str]
 
 
 @dataclass
 class EvalPrompt:
-    """Single prompt used for lightweight post-training evaluation.
-    - Inputs: prompt description inside ``config.eval.prompts``.
-    - Outputs: metadata passed to the evaluator client.
-    """
-
     instruction: str
     language: str
     max_sentences: Optional[int] = None
@@ -165,11 +120,6 @@ class EvalPrompt:
 
 @dataclass
 class EvalConfig:
-    """Parameters for prompt-based evaluation after training.
-    - Inputs: ``config.eval`` section.
-    - Outputs: generation hyper-parameters for the evaluation CLI.
-    """
-
     cutoff_len: int
     max_new_tokens: int
     temperature: float
@@ -180,11 +130,6 @@ class EvalConfig:
 
 @dataclass
 class ServeConfig:
-    """Configuration for vLLM serving and smoke-test discovery.
-    - Inputs: ``config.serve`` plus optional overrides from runtime metadata.
-    - Outputs: values used to mount models and advertise the service.
-    """
-
     host: str
     port: int
     max_model_len: int
@@ -197,11 +142,6 @@ class ServeConfig:
 
 @dataclass
 class LoggingConfig:
-    """Logging levels and tqdm behaviour for the entire pipeline.
-    - Inputs: ``config.logging`` values.
-    - Outputs: console/file verbosity applied across stages.
-    """
-
     console_level: str
     file_level: str
     tqdm_refresh_rate: float
@@ -210,20 +150,14 @@ class LoggingConfig:
 
 @dataclass
 class OrchestrationConfig:
-    """Configure optional follow-up stages after fine-tuning.
-    - Inputs: ``config.orchestration.post_finetune`` list.
-    - Outputs: ordered targets triggered by the wrapper script.
-    """
+    """Configure optional cross-stage orchestration behaviour."""
 
     post_finetune: List[str] = field(default_factory=list)
 
 
 @dataclass
 class NamingConfig:
-    """Settings that govern canonical run naming.
-    - Inputs: ``config.naming`` overrides.
-    - Outputs: rules enforced by ``src/core/run_naming.py``.
-    """
+    """Settings controlling canonical run naming."""
 
     normalize: bool = True
     separator: str = "-"
@@ -237,9 +171,11 @@ class NamingConfig:
 
 @dataclass
 class AwqConversionConfig:
-    """Configuration for AWQ/llm-compressor conversion sidecar.
-    - Inputs: ``config.awq`` (or legacy ``llm_compressor``) keys.
-    - Outputs: parameters forwarded to ``convert-awq`` helpers.
+    """Configuration for AWQ / llm-compressor conversion.
+
+    This replaces the old `LlmCompressorConfig`. For backward compatibility the
+    loader accepts both the top-level `awq` key and the legacy `llm_compressor`
+    key in YAML.
     """
 
     enabled: bool = False
@@ -257,11 +193,6 @@ class AwqConversionConfig:
 
 @dataclass
 class PipelineConfig:
-    """Aggregate configuration object returned by :class:`ConfigLoader`.
-    - Inputs: hydrated dataclasses for every pipeline stage.
-    - Outputs: single source of truth consumed by CLI commands.
-    """
-
     paths: PathsConfig
     preprocess: PreprocessConfig
     train: TrainConfig
@@ -276,10 +207,7 @@ class PipelineConfig:
 
 
 class ConfigLoader:
-    """Load YAML configuration and provide dataclass accessors.
-    - Inputs: path to a YAML configuration file.
-    - Outputs: :class:`PipelineConfig` with validated fields.
-    """
+    """Load configuration from YAML and provide dataclass accessors."""
 
     def __init__(self, config_path: str | Path) -> None:
         self.config_path = Path(config_path).expanduser().resolve()
@@ -293,8 +221,6 @@ class ConfigLoader:
         self.project_root = self.config_path.parent
 
     def load(self) -> PipelineConfig:
-        """Build a :class:`PipelineConfig` dataclass from the parsed YAML."""
-
         return PipelineConfig(
             paths=self._parse_paths(),
             preprocess=self._parse_preprocess(),
@@ -313,8 +239,6 @@ class ConfigLoader:
     # Parsers
     # ------------------------------------------------------------------
     def _parse_paths(self) -> PathsConfig:
-        """Parse the ``paths`` section into a dataclass."""
-
         data = self.raw.get("paths", {}) or {}
         huggingface_cache = data.get("huggingface_cache")
         if not huggingface_cache:
@@ -335,13 +259,8 @@ class ConfigLoader:
         )
 
     def _parse_preprocess(self) -> PreprocessConfig:
-        """Normalise preprocessing options for both modes."""
-
         data = self.raw.get("preprocess", {}) or {}
-        raw_langs = data.get("filter_langs", ["en"])
-        if raw_langs in (None, [], (), {}):
-            raw_langs = ["en"]
-        filter_langs = list(parse_comma_separated(raw_langs))
+        filter_langs = data.get("filter_langs", ["en"]) or []
 
         raw_sample = data.get("sample_size", 1000)
         if raw_sample is None or str(raw_sample).strip().lower() in {"", "null", "none", "full"}:
@@ -354,7 +273,7 @@ class ConfigLoader:
         real_section = data.get("real_data", {}) or {}
         oracle_section = real_section.get("oracle", {}) or {}
 
-        def _path_or_none(value: Any) -> Optional[Path]:
+        def _maybe_resolve(value: Any) -> Optional[Path]:
             if value in (None, "", "null"):
                 return None
             return self._resolve_path(value)
@@ -368,24 +287,30 @@ class ConfigLoader:
             password_env=self._to_optional_str(oracle_section.get("password_env")),
             batch_size=int(oracle_section.get("batch_size", 5000)),
             debug_print_sql=bool(self._to_bool(oracle_section.get("debug_print_sql", False))),
-            debug_sql_dir=_path_or_none(oracle_section.get("debug_sql_dir")),
-            instant_client_dir=_path_or_none(oracle_section.get("instant_client_dir")),
-            tns_admin=_path_or_none(oracle_section.get("tns_admin")),
-            stub_mode=bool(self._to_bool(oracle_section.get("stub_mode", False))),
-            stub_data_path=_path_or_none(oracle_section.get("stub_data_path")),
+            debug_sql_dir=_maybe_resolve(oracle_section.get("debug_sql_dir")),
+            instant_client_dir=_maybe_resolve(oracle_section.get("instant_client_dir")),
+            tns_admin=_maybe_resolve(oracle_section.get("tns_admin")),
         )
 
-        raw_prefixes = self._normalize_list(real_section.get("keep_prefixes", []))
+        raw_prefixes = real_section.get("keep_prefixes", [])
+        if raw_prefixes in (None, "", [], (), {}):
+            keep_prefixes: List[str] = []
+        else:
+            keep_prefixes = list(parse_comma_separated(raw_prefixes))
+
         raw_test_override = real_section.get("test_size")
-        test_size_override = None if raw_test_override in (None, "", "null") else float(raw_test_override)
+        if raw_test_override in (None, "", "null"):
+            test_size_override = None
+        else:
+            test_size_override = float(raw_test_override)
 
         real_config = RealDataConfig(
-            raw_dir=_path_or_none(real_section.get("raw_dir")),
-            sample_dir=_path_or_none(real_section.get("sample_dir")),
+            raw_dir=_maybe_resolve(real_section.get("raw_dir")),
+            sample_dir=_maybe_resolve(real_section.get("sample_dir")),
             use_sample_data=bool(self._to_bool(real_section.get("use_sample_data", False))),
             formatted_subdir=str(real_section.get("formatted_subdir", "formatted_json")),
-            metadata_csv=_path_or_none(real_section.get("metadata_csv")),
-            keep_prefixes=raw_prefixes,
+            metadata_csv=_maybe_resolve(real_section.get("metadata_csv")),
+            keep_prefixes=keep_prefixes,
             outside_to_other=bool(self._to_bool(real_section.get("outside_to_other", False))),
             outside_label=str(real_section.get("outside_label", "__OTHER__")),
             truncate_label_to=self._to_optional_int(real_section.get("truncate_label_to")),
@@ -393,36 +318,32 @@ class ConfigLoader:
             min_tokens=int(real_section.get("min_tokens", 40)),
             min_count=int(real_section.get("min_count", 0)),
             test_size_override=test_size_override,
-            copy_splits=bool(
-                self._to_bool(real_section.get("copy_splits", data.get("save_splits", True)))
-            ),
+            copy_splits=bool(self._to_bool(real_section.get("copy_splits", data.get("save_splits", True)))),
             dataset_stub=self._to_optional_str(real_section.get("dataset_stub"))
             or self._to_optional_str(data.get("dataset_name")),
             oracle=oracle_config,
         )
 
         if mode == "real_drg":
-            missing: List[str] = []
-            if not (oracle_config.enabled or oracle_config.stub_mode):
-                missing.append("preprocess.real_data.oracle.enabled|stub_mode")
-            if not oracle_config.stub_mode:
-                if not (oracle_config.dsn or oracle_config.network_alias):
-                    missing.append("preprocess.real_data.oracle.dsn|network_alias")
-                if not oracle_config.user:
-                    missing.append("preprocess.real_data.oracle.user")
-                if not (oracle_config.password or oracle_config.password_env):
-                    missing.append("preprocess.real_data.oracle.password|password_env")
-            elif not real_config.use_sample_data:
-                raise PipelineConfigError("Oracle stub mode is only supported when use_sample_data is enabled.")
-            if missing:
+            missing_fields: List[str] = []
+            if not oracle_config.enabled:
+                missing_fields.append("preprocess.real_data.oracle.enabled")
+            if not (oracle_config.dsn or oracle_config.network_alias):
+                missing_fields.append("preprocess.real_data.oracle.dsn|network_alias")
+            if not oracle_config.user:
+                missing_fields.append("preprocess.real_data.oracle.user")
+            if not (oracle_config.password or oracle_config.password_env):
+                missing_fields.append("preprocess.real_data.oracle.password|password_env")
+            if missing_fields:
                 raise PipelineConfigError(
-                    "DRG preprocessing requires Oracle credentials; missing: " + ", ".join(missing)
+                    "DRG preprocessing requires Oracle credentials; missing: "
+                    + ", ".join(missing_fields)
                 )
 
         return PreprocessConfig(
-            dataset_name=str(data.get("dataset_name", "")),
+            dataset_name=data.get("dataset_name", ""),
             sample_size=sample_size,
-            filter_langs=filter_langs,
+            filter_langs=list(parse_comma_separated(filter_langs)),
             test_size=float(data.get("test_size", 0.1)),
             cutoff_len=int(data.get("cutoff_len", 2048)),
             seed=int(data.get("seed", 42)),
@@ -434,8 +355,6 @@ class ConfigLoader:
         )
 
     def _parse_train(self) -> TrainConfig:
-        """Hydrate the ``train`` section with sensible defaults."""
-
         data = self.raw.get("train", {}) or {}
         report_to_raw = data.get("report_to", ["tensorboard"])
         if isinstance(report_to_raw, (str, bytes)):
@@ -446,19 +365,13 @@ class ConfigLoader:
             report_to = ["none"]
 
         logging_dir_raw = data.get("logging_dir")
-        logging_dir = None if logging_dir_raw in (None, "", "null", "None") else self._resolve_path(logging_dir_raw)
-
-        lora_targets_raw = data.get("lora_target_modules", ["q_proj", "v_proj"])
-        lora_targets = list(parse_comma_separated(lora_targets_raw))
-
-        eval_batch_raw = data.get("eval_batch_size")
-        eval_batch_size = None if eval_batch_raw in (None, "", "null") else int(eval_batch_raw)
-
-        abstain_raw = data.get("abstain_tau")
-        abstain_tau = None if abstain_raw in (None, "", "null") else float(abstain_raw)
+        if logging_dir_raw in (None, "", "null", "None"):
+            logging_dir = None
+        else:
+            logging_dir = self._resolve_path(logging_dir_raw)
 
         return TrainConfig(
-            base_model=str(data.get("base_model", "")),
+            base_model=data.get("base_model", ""),
             cutoff_len=int(data.get("cutoff_len", 2048)),
             batch_size=int(data.get("batch_size", 1)),
             gradient_accumulation=int(data.get("gradient_accumulation", 1)),
@@ -471,7 +384,9 @@ class ConfigLoader:
             lora_r=int(data.get("lora_r", 8)),
             lora_alpha=int(data.get("lora_alpha", 16)),
             lora_dropout=float(data.get("lora_dropout", 0.05)),
-            lora_target_modules=lora_targets,
+            lora_target_modules=list(
+                parse_comma_separated(data.get("lora_target_modules", ["q_proj", "v_proj"]))
+            ),
             gradient_checkpointing=bool(self._to_bool(data.get("gradient_checkpointing", True))),
             bf16=bool(self._to_bool(data.get("bf16", True))),
             fp16=bool(self._to_bool(data.get("fp16", True))),
@@ -481,20 +396,9 @@ class ConfigLoader:
             resume_from=self._to_optional_str(data.get("resume_from")),
             report_to=report_to,
             logging_dir=logging_dir,
-            eval_batch_size=eval_batch_size,
-            loss_type=str(data.get("loss_type", "weighted_ce")),
-            focal_gamma=float(data.get("focal_gamma", 2.0)),
-            label_smoothing=float(data.get("label_smoothing", 0.0)),
-            use_oversampling=bool(self._to_bool(data.get("use_oversampling", False))),
-            metric_for_best_model=str(data.get("metric_for_best_model", "macro_f1")),
-            greater_is_better=bool(self._to_bool(data.get("greater_is_better", True))),
-            abstain_tau=abstain_tau,
-            load_in_4bit=bool(self._to_bool(data.get("load_in_4bit", True))),
         )
 
     def _parse_export(self) -> ExportConfig:
-        """Parse settings for the adapter export stage."""
-
         data = self.raw.get("export", {}) or {}
         return ExportConfig(
             include_adapter_weights=bool(self._to_bool(data.get("include_adapter_weights", True))),
@@ -502,8 +406,6 @@ class ConfigLoader:
         )
 
     def _parse_eval(self) -> EvalConfig:
-        """Hydrate prompt-based evaluation configuration."""
-
         data = self.raw.get("eval", {}) or {}
         prompt_entries = data.get("prompts", []) or []
         prompts = [
@@ -524,14 +426,12 @@ class ConfigLoader:
         )
 
     def _parse_serve(self) -> ServeConfig:
-        """Parse vLLM serving configuration."""
-
         data = self.raw.get("serve", {}) or {}
         return ServeConfig(
-            host=str(data.get("host", "0.0.0.0")),
+            host=data.get("host", "0.0.0.0"),
             port=int(data.get("port", 8080)),
             max_model_len=int(data.get("max_model_len", 2048)),
-            served_model_name=str(data.get("served_model_name", "model")),
+            served_model_name=data.get("served_model_name", "model"),
             served_model_relpath=self._to_optional_str(data.get("served_model_relpath")),
             resume_from=self._to_optional_str(data.get("resume_from")),
             prefer_awq=bool(self._to_bool(data.get("prefer_awq", True))),
@@ -539,8 +439,6 @@ class ConfigLoader:
         )
 
     def _parse_logging(self) -> LoggingConfig:
-        """Parse global logging settings."""
-
         data = self.raw.get("logging", {}) or {}
         return LoggingConfig(
             console_level=str(data.get("console_level", "INFO")),
@@ -550,8 +448,6 @@ class ConfigLoader:
         )
 
     def _parse_orchestration(self) -> OrchestrationConfig:
-        """Parse optional follow-up stage list."""
-
         data = self.raw.get("orchestration", {}) or {}
         raw_post = data.get("post_finetune", [])
         if isinstance(raw_post, (str, bytes)):
@@ -561,13 +457,11 @@ class ConfigLoader:
         return OrchestrationConfig(post_finetune=post_finetune)
 
     def _parse_naming(self) -> NamingConfig:
-        """Validate naming rules used by the run manager."""
-
         data = self.raw.get("naming", {}) or {}
 
         separator = str(data.get("separator", "-") or "-")
         if len(separator) != 1:
-            raise PipelineConfigError("naming.separator must be a single character")
+            raise PipelineConfigError("naming.separator must be a single character to avoid ambiguous slugs")
 
         scope = str(data.get("run_counter_scope", "model_dataset")).strip().lower()
         allowed_scopes = {"global", "model", "model_dataset"}
@@ -584,7 +478,7 @@ class ConfigLoader:
             raise PipelineConfigError("naming.max_name_length must be positive")
         if max_name_length < max_segment_length:
             raise PipelineConfigError(
-                "naming.max_name_length must be >= naming.max_segment_length"
+                "naming.max_name_length must be greater than or equal to naming.max_segment_length"
             )
 
         return NamingConfig(
@@ -599,23 +493,18 @@ class ConfigLoader:
         )
 
     def _parse_awq_conversion(self) -> AwqConversionConfig:
-        """Parse AWQ conversion settings (or legacy llm-compressor block)."""
-
         data = self.raw.get("awq")
         if data is None:
-            data = self.raw.get("llm_compressor")
-        data = data or {}
+            data = self.raw.get("llm_compressor", {}) or {}
 
         extra = data.get("extra_args", [])
         if isinstance(extra, (list, tuple)):
             extra_args = [str(x) for x in extra]
-        elif extra in (None, "", "null"):
-            extra_args = []
         else:
-            extra_args = list(parse_comma_separated(extra))
+            extra_args = list(parse_comma_separated(extra or ""))
 
-        calib_raw = data.get("calib_text_file")
-        calib_path = self._resolve_path(calib_raw) if calib_raw else None
+        calib = data.get("calib_text_file")
+        calib_path = self._resolve_path(calib) if calib else None
 
         raw_num = data.get("num_calibration_samples")
         num_calib = None if raw_num in (None, "", "null") else int(raw_num)
@@ -637,9 +526,7 @@ class ConfigLoader:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _resolve_path(self, raw: Any) -> Path:
-        """Resolve ``raw`` against the project root and expand env markers."""
-
+    def _resolve_path(self, raw: str) -> Path:
         path = Path(os.path.expandvars(str(raw)))
         if not path.is_absolute():
             path = self.project_root / path
@@ -647,8 +534,6 @@ class ConfigLoader:
 
     @staticmethod
     def _to_bool(value: Any) -> bool:
-        """Coerce ``value`` to a boolean with strict validation."""
-
         if isinstance(value, bool):
             return value
         if value is None:
@@ -664,24 +549,215 @@ class ConfigLoader:
 
     @staticmethod
     def _to_optional_int(value: Any) -> Optional[int]:
-        """Return an optional integer value with null-aware handling."""
-
         return None if value in (None, "", "null") else int(value)
 
     @staticmethod
     def _to_optional_str(value: Any) -> Optional[str]:
-        """Return an optional string value with environment expansion."""
-
         if value in (None, "", "null"):
             return None
         return os.path.expandvars(str(value))
 
-    @staticmethod
-    def _normalize_list(raw: Any) -> List[str]:
-        """Normalise a comma-separated or iterable list of strings."""
+    def _parse_export(self) -> ExportConfig:
+        data = self.raw.get("export", {})
+        return ExportConfig(
+            include_adapter_weights=bool(self._to_bool(data.get("include_adapter_weights", True))),
+            resume_from=self._to_optional_str(data.get("resume_from")),
+        )
 
-        if raw in (None, "", [], (), {}):
-            return []
-        if isinstance(raw, str):
-            return [item.strip() for item in raw.split(",") if item.strip()]
-        return [str(item).strip() for item in raw if str(item).strip()]
+    def _parse_eval(self) -> EvalConfig:
+        data = self.raw.get("eval", {})
+        prompt_entries = data.get("prompts", []) or []
+        prompts = [
+            EvalPrompt(
+                instruction=item.get("instruction", ""),
+                language=item.get("language", "en"),
+                max_sentences=item.get("max_sentences"),
+            )
+            for item in prompt_entries
+        ]
+        return EvalConfig(
+            cutoff_len=int(data.get("cutoff_len", 2048)),
+            max_new_tokens=int(data.get("max_new_tokens", 256)),
+            temperature=float(data.get("temperature", 0.7)),
+            top_p=float(data.get("top_p", 0.9)),
+            prompts=prompts,
+            resume_from=self._to_optional_str(data.get("resume_from")),
+        )
+            report_to = [str(item).strip() for item in (report_to_raw or []) if str(item).strip()]
+        if not report_to:
+            report_to = ["none"]
+
+        logging_dir_raw = data.get("logging_dir")
+        if logging_dir_raw in (None, "", "null", "None"):
+            logging_dir = None
+        else:
+                    network_alias=self._to_optional_str(oracle_section.get("network_alias")),
+                    user=self._to_optional_str(oracle_section.get("user")),
+
+        return TrainConfig(
+            base_model=data.get("base_model", ""),
+            cutoff_len=int(data.get("cutoff_len", 2048)),
+            batch_size=int(data.get("batch_size", 1)),
+            gradient_accumulation=int(data.get("gradient_accumulation", 1)),
+                    tns_admin=_maybe_resolve(oracle_section.get("tns_admin")),
+            epochs=int(data.get("epochs", 1)),
+            learning_rate=float(data.get("learning_rate", 2e-5)),
+            min_learning_rate=float(data.get("min_learning_rate", 5e-6)),
+            weight_decay=float(data.get("weight_decay", 0.0)),
+            warmup_ratio=float(data.get("warmup_ratio", 0.0)),
+            lr_scheduler=str(data.get("lr_scheduler", "linear")),
+            lora_r=int(data.get("lora_r", 8)),
+            lora_alpha=int(data.get("lora_alpha", 16)),
+            lora_dropout=float(data.get("lora_dropout", 0.05)),
+            lora_target_modules=list(parse_comma_separated(data.get("lora_target_modules", ["q_proj", "v_proj"]))),
+            gradient_checkpointing=bool(self._to_bool(data.get("gradient_checkpointing", True))),
+            bf16=bool(self._to_bool(data.get("bf16", True))),
+            fp16=bool(self._to_bool(data.get("fp16", True))),
+            logging_steps=int(data.get("logging_steps", 20)),
+            eval_steps=int(data.get("eval_steps", 100)),
+            max_steps=self._to_optional_int(data.get("max_steps")),
+            resume_from=self._to_optional_str(data.get("resume_from")),
+            report_to=report_to,
+            logging_dir=logging_dir,
+        )
+
+    def _parse_export(self) -> ExportConfig:
+        data = self.raw.get("export", {})
+        return ExportConfig(
+            include_adapter_weights=bool(self._to_bool(data.get("include_adapter_weights", True))),
+            resume_from=self._to_optional_str(data.get("resume_from")),
+        )
+
+    def _parse_serve(self) -> ServeConfig:
+        data = self.raw.get("serve", {})
+        return ServeConfig(
+            host=data.get("host", "0.0.0.0"),
+            port=int(data.get("port", 8080)),
+            max_model_len=int(data.get("max_model_len", 2048)),
+            served_model_name=data.get("served_model_name", "model"),
+            served_model_relpath=self._to_optional_str(data.get("served_model_relpath")),
+            resume_from=self._to_optional_str(data.get("resume_from")),
+            prefer_awq=bool(self._to_bool(data.get("prefer_awq", True))),
+            model_name=self._to_optional_str(data.get("model_name")),
+        )
+
+    def _parse_logging(self) -> LoggingConfig:
+        data = self.raw.get("logging", {})
+        return LoggingConfig(
+            console_level=str(data.get("console_level", "INFO")),
+            file_level=str(data.get("file_level", "DEBUG")),
+            tqdm_refresh_rate=float(data.get("tqdm_refresh_rate", 1.0)),
+            debug_pipeline=bool(self._to_bool(data.get("debug_pipeline", False))),
+        )
+
+    def _parse_orchestration(self) -> OrchestrationConfig:
+        data = self.raw.get("orchestration", {}) or {}
+        raw_post = data.get("post_finetune", [])
+        if isinstance(raw_post, (str, bytes)):
+            post_finetune = [item.strip() for item in str(raw_post).split(",") if item.strip()]
+        else:
+            post_finetune = [str(item).strip() for item in (raw_post or []) if str(item).strip()]
+        return OrchestrationConfig(post_finetune=post_finetune)
+
+    def _parse_naming(self) -> NamingConfig:
+        data = self.raw.get("naming", {}) or {}
+
+        separator = str(data.get("separator", "-") or "-")
+        if len(separator) != 1:
+            raise PipelineConfigError(
+                "naming.separator must be a single character to avoid ambiguous slugs"
+            )
+
+        scope = str(data.get("run_counter_scope", "model_dataset")).strip().lower()
+        allowed_scopes = {"global", "model", "model_dataset"}
+        if scope not in allowed_scopes:
+            raise PipelineConfigError(
+                f"naming.run_counter_scope must be one of {sorted(allowed_scopes)}, got: {scope}"
+            )
+
+        max_segment_length = int(data.get("max_segment_length", 64))
+        max_name_length = int(data.get("max_name_length", 128))
+        if max_segment_length <= 0:
+            raise PipelineConfigError("naming.max_segment_length must be positive")
+        if max_name_length <= 0:
+            raise PipelineConfigError("naming.max_name_length must be positive")
+        if max_name_length < max_segment_length:
+            raise PipelineConfigError(
+                "naming.max_name_length must be greater than or equal to naming.max_segment_length"
+            )
+
+        return NamingConfig(
+            normalize=bool(self._to_bool(data.get("normalize", True))),
+            separator=separator,
+            run_counter_scope=scope,
+            run_prefix=str(data.get("run_prefix", "")),
+            legacy_allowed=bool(self._to_bool(data.get("legacy_allowed", True))),
+            max_segment_length=max_segment_length,
+            max_name_length=max_name_length,
+            use_legacy=bool(self._to_bool(data.get("use_legacy", False))),
+        )
+
+    def _parse_awq_conversion(self) -> AwqConversionConfig:
+        # Accept either `awq` (new) or `llm_compressor` (legacy) top-level keys.
+        data = self.raw.get("awq", None)
+        if data is None:
+            data = self.raw.get("llm_compressor", {}) or {}
+        extra = data.get("extra_args", [])
+        if isinstance(extra, (list, tuple)):
+            extra_args = [str(x) for x in extra]
+        else:
+            extra_args = list(parse_comma_separated(extra or ""))
+
+        calib = data.get("calib_text_file")
+        calib_path = self._resolve_path(calib) if calib else None
+
+        raw_num = data.get("num_calibration_samples")
+        num_calib = None if raw_num in (None, "", "null") else int(raw_num)
+
+        return AwqConversionConfig(
+            enabled=bool(self._to_bool(data.get("enabled", False))),
+            gpu_enabled=bool(self._to_bool(data.get("gpu_enabled", False))),
+            method=self._to_optional_str(data.get("method")),
+            scheme=self._to_optional_str(data.get("scheme")),
+            num_calibration_samples=num_calib,
+            calib_text_file=calib_path,
+            extra_args=extra_args,
+            use_smoothquant=bool(self._to_bool(data.get("use_smoothquant", True))),
+            smoothquant_strength=float(data.get("smoothquant_strength", 0.8)),
+            max_seq_length=self._to_optional_int(data.get("max_seq_length")),
+            output_suffix=str(data.get("output_suffix", "awq")),
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _resolve_path(self, raw: str) -> Path:
+        path = Path(os.path.expandvars(str(raw)))
+        if not path.is_absolute():
+            path = self.project_root / path
+        return expand_path(path)
+
+    @staticmethod
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        value_str = str(value).strip().lower()
+        if value_str in {"1", "true", "yes", "y"}:
+            return True
+        if value_str in {"0", "false", "no", "n"}:
+            return False
+        raise PipelineConfigError(f"Cannot coerce value to bool: {value}")
+
+    @staticmethod
+    def _to_optional_int(value: Any) -> Optional[int]:
+        return None if value in (None, "", "null") else int(value)
+
+    @staticmethod
+    def _to_optional_str(value: Any) -> Optional[str]:
+        if value in (None, "", "null"):
+            return None
+        return os.path.expandvars(str(value))

@@ -93,6 +93,15 @@ def _make_cfg(
         resume_from=None,
         report_to=["tensorboard"],
         logging_dir=None,
+        eval_batch_size=None,
+        loss_type="weighted_ce",
+        focal_gamma=2.0,
+        label_smoothing=0.0,
+        use_oversampling=False,
+        metric_for_best_model="macro_f1",
+        greater_is_better=True,
+        abstain_tau=None,
+        load_in_4bit=True,
     )
 
     export = ExportConfig(include_adapter_weights=True, resume_from=None)

@@ -8,17 +8,46 @@ paths:
   run_metadata_file: logs/latest.txt
 
 preprocess:
-  dataset_name: tatsu-lab/alpaca
+  mode: real_drg
+  dataset_name: drg_letters
   sample_size: full
   filter_langs:
     - en
-    # - fr
-  test_size: 0.2
+  test_size: 0.1
   cutoff_len: 2048
   seed: 215
   save_splits: true
   max_workers: 4
-  pack_sequences: true
+  pack_sequences: false
+  real_data:
+    raw_dir: "\\\\pc-27327\\Projets\\DRG-Prediction\\data\\Extractions\\RAW-JSON-SORTIE"
+    sample_dir: data/sample_real_data
+    use_sample_data: false
+    formatted_subdir: formatted_json
+    metadata_csv: null
+    keep_prefixes: []
+    outside_to_other: false
+    outside_label: "__OTHER__"
+    truncate_label_to: 4
+    tokenizer: Qwen/Qwen2.5-0.5B
+    min_tokens: 40
+    min_count: 5
+    test_size: 0.1
+    copy_splits: true
+    dataset_stub: drg_letters
+    oracle:
+      enabled: true
+      stub_mode: false
+      stub_data_path: null
+      dsn: "${ORACLE_DSN}"
+      network_alias: "${ORACLE_NETWORK_ALIAS}"
+      user: "${ORACLE_USER}"
+      password_env: ORACLE_PASSWORD
+      batch_size: 2000
+      debug_print_sql: false
+      debug_sql_dir: null
+      instant_client_dir: null
+      tns_admin: "${ORACLE_TNS_PATH}"
 
 train:
   base_model: Qwen/Qwen2-7B
@@ -53,6 +82,15 @@ train:
   # Keep >=3 for smoke checks; set to null for full-session runs once validated.
   max_steps: null  # Default smoke pass; temporarily set to null when running full epochs
   resume_from: null
+  eval_batch_size: 4
+  loss_type: focal
+  focal_gamma: 2.0
+  label_smoothing: 0.05
+  use_oversampling: true
+  metric_for_best_model: macro_f1
+  greater_is_better: true
+  abstain_tau: null
+  load_in_4bit: true
 
 export:
   include_adapter_weights: true

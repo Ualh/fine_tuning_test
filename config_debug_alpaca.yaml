@@ -8,9 +8,9 @@ paths:
   run_metadata_file: logs/latest.txt
 
 preprocess:
-  mode: real_drg
-  dataset_name: drg_letters_debug #tatsu-lab/alpaca
-  sample_size: full #2048
+  mode: huggingface
+  dataset_name: tatsu-lab/alpaca
+  sample_size: 128
   filter_langs:
     - en
   test_size: 0.2
@@ -18,39 +18,10 @@ preprocess:
   seed: 215
   save_splits: true
   max_workers: 2
-  pack_sequences: false
-  real_data:
-    raw_dir: "\\\\pc-27327\\Projets\\DRG-Prediction\\data\\Extractions\\RAW-JSON-SORTIE"
-    sample_dir: data/sample_real_data
-    use_sample_data: true
-    formatted_subdir: formatted_json
-    metadata_csv: null
-    keep_prefixes: []
-    outside_to_other: false
-    outside_label: "__OTHER__"
-    truncate_label_to: 4
-    tokenizer: hf-internal-testing/llama-tokenizer
-    min_tokens: 8
-    min_count: 2
-    test_size: 0.2
-    copy_splits: false
-    dataset_stub: drg_letters_debug
-    oracle:
-      enabled: false
-      stub_mode: true
-      stub_data_path: null
-      dsn: null
-      network_alias: null
-      user: null
-      password_env: null
-      batch_size: 512
-      debug_print_sql: false
-      debug_sql_dir: null
-      instant_client_dir: null
-      tns_admin: "${ORACLE_TNS_PATH}"
+  pack_sequences: true
 
 train:
-  base_model: Qwen/Qwen2.5-0.5B
+  base_model: hf-internal-testing/tiny-random-LlamaForCausalLM
   cutoff_len: 512
   batch_size: 1
   gradient_accumulation: 1
@@ -68,9 +39,6 @@ train:
     - k_proj
     - v_proj
     - o_proj
-    - gate_proj
-    - up_proj
-    - down_proj
   gradient_checkpointing: true
   bf16: false
   fp16: false
@@ -79,36 +47,21 @@ train:
   report_to:
     - tensorboard
   logging_dir: null
-  max_steps: 10
+  max_steps: 20
   resume_from: null
   eval_batch_size: 1
-  loss_type: focal
+  loss_type: weighted_ce
   focal_gamma: 2.0
   label_smoothing: 0.05
   use_oversampling: false
   metric_for_best_model: macro_f1
   greater_is_better: true
-  abstain_tau: 0.5
-  load_in_4bit: true
+  abstain_tau: null
+  load_in_4bit: false
 
 export:
   include_adapter_weights: true
   resume_from: null
-
-awq:
-  enabled: true
-  gpu_enabled: false
-  method: awq
-  scheme: W4A16_ASYM
-  num_calibration_samples: 32
-  calib_text_file: prepared/awq_calibration.txt
-  extra_args: []
-  use_smoothquant: true
-  smoothquant_strength: 0.8
-  max_seq_length: 1024
-  output_suffix: awq
-  ignore:
-    - lm_head
 
 eval:
   cutoff_len: 512
@@ -116,7 +69,7 @@ eval:
   temperature: 0.7
   top_p: 0.9
   prompts:
-    - instruction: "Summarize the DRG letters dataset in one sentence."
+    - instruction: "Summarize the Alpaca debug dataset in one sentence."
       language: en
       max_sentences: 1
   resume_from: null
@@ -125,8 +78,8 @@ serve:
   host: 0.0.0.0
   port: 8080
   max_model_len: 512
-  served_model_name: Qwen2.5-0.5B-SFT-DEBUG
-  prefer_awq: true
+  served_model_name: TinyAlpaca-SFT-DEBUG
+  prefer_awq: false
   served_model_relpath: null
   model_name: null
   resume_from: null
@@ -147,9 +100,20 @@ naming:
   max_name_length: 128
   use_legacy: false
 
+awq:
+  enabled: false
+  gpu_enabled: false
+  method: awq
+  scheme: W4A16_ASYM
+  num_calibration_samples: 32
+  calib_text_file: prepared/awq_calibration.txt
+  extra_args: []
+  use_smoothquant: true
+  smoothquant_strength: 0.8
+  max_seq_length: 1024
+  output_suffix: awq
+
 orchestration:
   post_finetune:
     - export-merged
-    - convert-awq
     - eval-sft
-    - serve-vllm

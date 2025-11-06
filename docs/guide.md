@@ -14,11 +14,20 @@ docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
 ```
 
 ## 2) Configure once
-Create `.env` next to `docker-compose.yml`:
+Create `.env` next to `docker-compose.yml` and seed credentials for the mode you run:
 ```
+# Hugging Face mode (synthetic Alpaca style data)
 HF_TOKEN=hf_XXXXXXXXXXXXXXXXXXXXXXXX
+
+# DRG mode (real notes, Oracle enrichment is mandatory)
+ORACLE_DSN=orclpdb1
+ORACLE_NETWORK_ALIAS=drg
+ORACLE_USER=analytics
+ORACLE_PASSWORD=super_secure_password
+ORACLE_TNS_PATH=D:\wallets\orcl
 ```
-Review `config.yaml` and adjust as needed. For full-epoch runs, ensure:
+If your environment uses only a DSN, you can drop `ORACLE_NETWORK_ALIAS`; the loader resolves whichever value is present.
+Review `config.yaml` and adjust as needed. The key switch is `data.mode` with `huggingface` (default tutorials) or `real_drg` (Oracle-backed pipeline). For full-epoch runs, ensure:
 ```yaml
 train:
   max_steps: null
@@ -42,12 +51,12 @@ Optional shell inside the training container:
 ## 4) Run the pipeline
 All stages read from `config.yaml`. You can override most options via wrapper environment variables.
 
-Preprocess (creates JSONL splits under `prepared/`):
+Preprocess (creates JSONL splits under `prepared/`; the pipeline dispatches to DRG or Alpaca builders based on `data.mode`):
 ```powershell
 .\run_pipeline.bat preprocess-sft
 ```
 
-Fine-tune (writes adapters and trainer state under `outputs/`):
+Fine-tune (writes adapters and trainer state under `outputs/`; DRG mode trains the classifier runner; Hugging Face mode runs LoRA SFT):
 ```powershell
 .\run_pipeline.bat finetune-sft
 ```
@@ -82,6 +91,11 @@ python -m src.cli.main smoke-test --prompt "Résume AC215 en trois points."
 Print resolved runtime (paths, compose project, served model path):
 ```powershell
 python -m src.cli.main print-runtime --format json
+```
+
+Inspect current mode and resolved credentials (omit `oracle_` fields when you run in `huggingface` mode):
+```powershell
+python -m src.cli.main print-runtime --format json | ConvertFrom-Json | Select-Object data_mode, oracle_enabled
 ```
 
 Start/stop containers:

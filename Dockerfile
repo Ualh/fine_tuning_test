@@ -51,6 +51,7 @@ WORKDIR /app
 ## Install Python dependencies from requirements.txt (includes llmcompressor)
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-deps oracledb==1.4.2
 COPY . /app
 
 ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128

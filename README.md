@@ -1,16 +1,16 @@
 ## Overview
 
-This repository delivers a fully local workflow to fine-tune **Qwen/Qwen2.5-0.5B** on the AutoIF
-instruction-following dataset with LoRA, evaluate the result, and serve it through **vLLM**. It follows
-the spirit of `example_fine_tuning_qwen` while modernising the codebase with a modular `src/` layout,
-Typer CLI, rich logging, resumable stages, and configuration-driven parameters.
+This repository delivers a fully local workflow to fine-tune Qwen models with LoRA, evaluate the result,
+and serve it through **vLLM**. Two preprocessing/training modes are supported:
 
-Optimised for a single **GeForce RTX 5070 Ti (16 GB)** workstation:
+- **DRG classification (default)** – enrich raw hospital discharge letters via Oracle, build parquet
+  splits, and train a sequence-classification head for DRG prediction (mirrors `example_code/finetune_drg.py`).
+- **Hugging Face datasets (Alpaca, etc.)** – keep the original SFT flow for instruction tuning by setting
+  `preprocess.mode: huggingface` and `preprocess.dataset_name` to any HF dataset.
 
-- 2 000-sample EN/FR subset for quick iterations.
-- LoRA (bf16/fp16-ready) with sequence packing for efficient VRAM use.
-- Merged checkpoint ready for vLLM on port 8080.
-- Everything runs locally: Docker, DVC cache, Hugging Face cache, model artefacts.
+Both modes share the same Typer CLI, Docker runtime, logging, and run management. The DRG path requires
+Oracle credentials (see **Environment setup**) while the Hugging Face path remains ideal for smoke tests
+or experimentation without production data access.
 
 ## Project structure
 
@@ -36,14 +36,17 @@ Runtime directories (ignored by git):
 ## Quick start
 
 1. Clone/open the repo in VS Code (PowerShell, GPU enabled).
-2. Review `config.yaml` and adjust paths or hyper-parameters.
-3. Build the Docker image: `run_pipeline.bat build`
-4. Start the training container: `run_pipeline.bat up`
-5. Execute stages:
+2. Create/adjust `.env` with the required secrets:
+  - `HF_TOKEN` (optional, for gated models)
+  - `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_DSN`, `ORACLE_NETWORK_ALIAS`, `ORACLE_TNS_PATH`
+3. Review `config.yaml` and adjust paths or hyper-parameters (switch `preprocess.mode` as needed).
+4. Build the Docker image: `run_pipeline.bat build`
+5. Start the training container: `run_pipeline.bat up`
+6. Execute stages:
   - `run_pipeline.bat preprocess-sft`
   - `run_pipeline.bat finetune-sft`
     - By default the pipeline will automatically chain: export-merged → convert-awq → eval-sft → serve-vllm using the same run directory. You can tune this in `orchestration.post_finetune`.
-6. Smoke-test the served model:
+7. Smoke-test the served model:
    - `python -m src.cli.main smoke-test --prompt "Résume AC215 en trois points."`
 
 Each stage now reads dataset/model/paths from `config.yaml`; edit the YAML once and rerun the desired commands. Standalone stages (export-merged, convert-awq, eval-sft, serve-vllm) reuse an existing run; they will refuse to create a fresh run without the required artefacts. Pass `--run-name`, or explicit directories (e.g., `--adapter-dir`, `--merged-dir`), or run `finetune-sft` first.
@@ -55,6 +58,27 @@ run_pipeline.bat bash
 python3 -m src.cli.main print-runtime --format json
 ```
 
+### Preprocessing modes
+
+- `real_drg` (default): requires access to the hospital Oracle DW. `preprocess.real_data` controls the
+  enrichment options (raw/sample directories, token filters, rare-label handling). All Oracle fields must
+  be supplied either directly in the YAML or via the `.env` variables listed above.
+- `huggingface`: disables Oracle enrichment and reverts to the original SFT flow. Set
+  `preprocess.dataset_name` (e.g., `tatsu-lab/alpaca`) and `preprocess.sample_size` as desired. The CLI
+  will import the legacy `DataPreprocessor` and the training stage will use `SFTTrainerRunner`.
+
+Switching mode only requires editing `config.yaml` (or an override such as `debug_config.yaml`); downstream
+commands automatically adapt to the chosen mode.
+
+Sample configs ready for quick validation:
+- `debug_config.yaml` – DRG letters stub-mode run (Oracle disabled, small splits).
+- `config_debug_alpaca.yaml` – Hugging Face Alpaca sample run (tiny model, TRL SFT trainer).
+
+`finetune-sft` mirrors the selected mode automatically. The DRG path now wires in the same ingredients as
+`example_code/finetune_drg.py`: class-balanced focal or weighted cross-entropy, optional oversampling via a
+`WeightedRandomSampler`, BitsAndBytes 4-bit loading (with graceful CPU fallback), manual tokenisation, and
+extended metric logging (macro F1, abstention statistics, TensorBoard).
+
 ### Run naming & overrides
 
 Every stage now resolves a canonical run slug following `<model>-<dataset>-<size>-runX` and stores all artefacts under `outputs/<run-name>/` and `logs/<run-name>/`. Use the helper to preview the slug without touching the filesystem:
@@ -62,7 +86,7 @@ Every stage now resolves a canonical run slug following `<model>-<dataset>-<size
 ```powershell
 run_pipeline.bat run-name-preview
 run_pipeline.bat run-name-preview RUN_INDEX=5
-run_pipeline.bat run-name-preview FORCE_RUN_NAME=qwen2-7b-alpaca-full-run42
+run_pipeline.bat run-name-preview FORCE_RUN_NAME=qwen2-7b-drg_letters-full-run42
 ```
 
 `print-runtime` echoes the same values along with helper variables (`RUN_DIR_NAME`, `RUN_OUTPUTS_DIR`, `RUN_LOGS_DIR`, container paths, etc.). To override the next run, set any of the following before invoking the pipeline:
@@ -89,7 +113,8 @@ All overrides propagate to the runtime probe (`print-runtime`) and to downstream
 All tunables live in `config.yaml`:
 
 - `paths`: prepared/output/log directories, Hugging Face cache, and vLLM models mount (`\\pc-27327\D\LLM`).
-- `preprocess`: dataset, sample size, language filters, train/val split, sequence packing.
+- `preprocess`: dataset, sample size, language filters, train/val split, sequence packing, and `mode`
+  (`real_drg` for Oracle-backed classification, `huggingface` for datasets like Alpaca).
 - `train`: LoRA hyper-parameters, scheduler, precision flags, logging cadence, resume options.
 - `export`: merged checkpoint behaviour.
 - `eval`: prompt suite plus generation parameters.
@@ -125,6 +150,17 @@ Notes:
 
 
 ## Environment setup
+
+Create a `.env` file at the project root (or export the variables before running the pipeline):
+
+```
+HF_TOKEN=<optional huggingface token>
+ORACLE_USER=<oracle username>
+ORACLE_PASSWORD=<oracle password>
+ORACLE_DSN=<host:port/service or EZConnect string>
+ORACLE_NETWORK_ALIAS=<alias present in tnsnames.ora>
+ORACLE_TNS_PATH=<directory containing tnsnames.ora>
+```
 
 ```powershell
 python -m venv .venv
@@ -176,8 +212,8 @@ paths and names, so switching models/data only requires editing the YAML once.
 ```powershell
 run_pipeline.bat build             # Build CUDA/PyTorch image
 run_pipeline.bat up                # Start training container (reuse across stages)
-run_pipeline.bat preprocess-sft    # Prepare N examples (see preprocess.sample_size)
-run_pipeline.bat finetune-sft      # Run LoRA training (resumable)
+run_pipeline.bat preprocess-sft    # Enrich + build DRG dataset (mode=real_drg) or pull HF splits (mode=huggingface)
+run_pipeline.bat finetune-sft      # Train DRG classifier or run the original SFT LoRA loop
 run_pipeline.bat export-merged     # Merge adapters into base model
 run_pipeline.bat eval-sft          # Lightweight evaluation checkpoints
 run_pipeline.bat serve-vllm        # Launch vLLM on port 8080
@@ -204,7 +240,7 @@ Open WebUI is preconfigured to talk to the vLLM OpenAI endpoint inside the compo
   `console.log` (stdout/stderr with ANSI sequences stripped), and `container.log` (tail of
   `docker logs --tail 2000` for the training container captured by `run_pipeline.bat`).
 - Metadata JSON files (`metadata.json`, `metrics.json`) summarise seeds, sizes, metrics, and timings.
-- Run directories already encode the dataset sample size (e.g. `qwen2-7b-alpaca-full-run3`), and subfolders retain the previous layout (`adapter`, `merged`, `eval`, etc.).
+- Run directories already encode the dataset scope (e.g. `qwen2-7b-drg_letters-full-run3`), and subfolders retain the previous layout (`adapter`, `merged`, `eval`, etc.).
 - Console output stays tidy; dive into `run.log` for full stack traces and inspect `console.log`
   when you need the plain-text CLI output that appeared on screen.
   
@@ -213,7 +249,7 @@ Logging behaviour (what you see vs what is recorded)
 - By default the interactive console is intentionally quiet and only shows WARNING and higher.
   This keeps the terminal readable during long runs. All DEBUG/INFO messages (including per-step
   and per-eval metric snapshots) are written to the stage `run.log` file under the run folder
-  (e.g. `logs/qwen2-7b-alpaca-full-run1/train/run.log`).
+  (e.g. `logs/qwen2-7b-drg_letters-full-run1/train/run.log`).
 - Warnings, deprecation notes, and library INFO/DEBUG entries are also captured in `run.log` so
   you can inspect them later without cluttering the console.
 - Progress bars are labelled by stage: `TRAIN` for fine-tuning, `EVAL` for evaluation, and
@@ -275,7 +311,7 @@ This keeps lineage for prepared splits and model artefacts without requiring a r
 
 ## Troubleshooting
 
-- **Docker cannot access `\\pc-27327\D\LLM`**: map the share to a drive letter (e.g. `Z:`) and update
+- **Docker cannot access `\\pc-27327\Projets\DRG-Prediction`**: map the share to a drive letter (e.g. `Z:`) and update
   `config.yaml` and `docker-compose.yml` accordingly.
 - **CUDA OOM**: reduce `BATCH`, increase `GRAD_ACCUM`, or lower `CUTOFF`.
 - **Preprocess slow**: disable packing (`--pack-sequences false`) or lower `MAX_WORKERS` for CPU-bound

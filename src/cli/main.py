@@ -6,11 +6,8 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
-import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import typer
 
@@ -26,12 +23,13 @@ from ..core.run_manager import RunManager
 from ..core.run_naming import RunNameResult, build_run_name
 from ..core.resume import ResumeManager
 from ..core.ssl import disable_ssl_verification
-from ..data.preprocess import DataPreprocessor
-from ..training.sft_trainer import SFTTrainerRunner
-from ..training.lora_merge import LoraMerger
- 
-from ..eval.evaluator import Evaluator
-from ..serve.vllm_client import VLLMClient
+
+if TYPE_CHECKING:  # pragma: no cover - optional imports for type hints only
+    from ..data.preprocess import DataPreprocessor
+    from ..training.sft_trainer import SFTTrainerRunner
+    from ..training.lora_merge import LoraMerger
+    from ..eval.evaluator import Evaluator
+    from ..serve.vllm_client import VLLMClient
 
 POST_FINETUNE_TARGETS = {"export-merged", "convert-awq", "eval-sft", "serve-vllm"}
 
@@ -56,8 +54,15 @@ def _level_to_int(level: str) -> int:
 
 
 def _default_preprocess_dir(cfg: PipelineConfig) -> Path:
-    dataset_stub = cfg.preprocess.dataset_name.split("/")[-1] if cfg.preprocess.dataset_name else "dataset"
-    size_tag = "full" if (cfg.preprocess.sample_size in (None, 0)) else str(cfg.preprocess.sample_size)
+    if cfg.preprocess.mode != "huggingface" and cfg.preprocess.real_data.dataset_stub:
+        dataset_stub = cfg.preprocess.real_data.dataset_stub
+    else:
+        dataset_stub = cfg.preprocess.dataset_name.split("/")[-1] if cfg.preprocess.dataset_name else "dataset"
+
+    if cfg.preprocess.mode != "huggingface" and cfg.preprocess.real_data.use_sample_data:
+        size_tag = "sample"
+    else:
+        size_tag = "full" if (cfg.preprocess.sample_size in (None, 0)) else str(cfg.preprocess.sample_size)
     return cfg.paths.prepared_dir / f"{dataset_stub}_{size_tag}".replace("-", "_")
 
 
@@ -148,189 +153,6 @@ def _require_existing_outputs(cfg: PipelineConfig, run_name: str) -> None:
     )
 
 
-@app.command("run-name-preview")
-def run_name_preview(
-    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
-    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
-    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
-    format: str = typer.Option("name", "--format", "-f", help="Output format: name, json, or env."),
-) -> None:
-    """Preview the resolved run name without reserving directories."""
-
-    disable_ssl_verification()
-    cfg = _load_config(config)
-    run_info = _compute_run_info(
-        cfg,
-        run_name=run_name,
-        run_index=run_index,
-        update_env=False,
-    )
-
-    fmt = format.lower()
-    if fmt == "name":
-        typer.echo(run_info.name)
-        return
-    if fmt == "json":
-        payload = {
-            "run_name": run_info.name,
-            "run_prefix": run_info.prefix,
-            "run_number": run_info.index,
-            "model_slug": run_info.model_slug,
-            "dataset_slug": run_info.dataset_slug,
-            "size_slug": run_info.size_slug,
-            "legacy": run_info.legacy,
-        }
-        typer.echo(json.dumps(payload, indent=2))
-        return
-    if fmt == "env":
-        for key, value in run_info.to_env().items():
-            typer.echo(f"{key}={value}")
-        return
-    raise typer.BadParameter("Unsupported format. Use 'name', 'json', or 'env'.", param_hint="format")
-
-
-@app.command("convert-awq")
-def convert_awq(
-    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
-    merged_dir: Optional[Path] = typer.Option(None, help="Merged model directory (defaults to outputs/*/merged)."),
-    output_dir: Optional[Path] = typer.Option(None, help="Where to store compressed model output."),
-    force: bool = typer.Option(False, help="Overwrite existing output if present."),
-    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
-    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
-) -> None:
-    """Run AWQ conversion using the isolated `awq-runner` sidecar (preferred) or locally.
-
-    The command will shell out to `docker compose run --rm --no-deps -T awq-runner ...`
-    when Docker is available. If Docker is not available but the environment has
-    the Python dependencies installed, it will call the in-repo runner
-    implementation (`src.training.awq_runner`) directly.
-    """
-    disable_ssl_verification()
-    cfg = _load_config(config)
-
-    merged_hint = merged_dir if merged_dir is not None else None
-    output_hint = output_dir if output_dir is not None else None
-    run_name_override = run_name or _infer_run_name_from_outputs(cfg, [merged_hint, output_hint])
-    if run_name_override is None:
-        run_name_override = _read_latest_run_name(cfg)
-    if run_name_override is None:
-        raise typer.BadParameter(
-            "Unable to determine run context. Provide --run-name, --merged-dir or execute finetune-sft first."
-        )
-
-    run_info = _compute_run_info(cfg, run_name=run_name_override, run_index=run_index)
-    _require_existing_outputs(cfg, run_info.name)
-    outputs_root, _ = _ensure_run_dirs(cfg, run_info)
-
-    run_manager = RunManager(cfg, run_info=run_info)
-    _, run_dir = run_manager.create_run_dir("convert-awq")
-    logger = configure_logging(
-        name="convert-awq",
-        log_dir=run_dir,
-        console_level=_level_to_int(cfg.logging.console_level),
-        file_level=_level_to_int(cfg.logging.file_level),
-    )
-
-    logger.info("Starting AWQ conversion for run %s", run_info.name)
-    logger.debug("Runtime resolved outputs dir: %s", outputs_root)
-
-    merged_resolved = Path(merged_dir or (outputs_root / "merged"))
-    out_resolved = Path(output_dir or (outputs_root / "merged_awq"))
-
-    logger.info("Merged directory: %s", merged_resolved)
-    logger.info("Target AWQ output directory: %s", out_resolved)
-
-    # Check config AWQ block (loader supports legacy `llm_compressor` key)
-    awq_cfg = getattr(cfg, "awq_conversion", None)
-    enabled = True
-    gpu_enabled = False
-    if awq_cfg:
-        enabled = bool(getattr(awq_cfg, "enabled", True))
-        gpu_enabled = bool(getattr(awq_cfg, "gpu_enabled", False))
-
-    if not enabled and not force:
-        logger.info("AWQ conversion disabled in config and --force not provided; skipping conversion.")
-        finalize_logger(logger)
-        return
-
-    console_log = run_dir / "console.log"
-    try:
-        with tee_std_streams(console_log):
-            start_time = time.perf_counter()
-            docker_exe = shutil.which("docker")
-            if docker_exe:
-                logger.info("Docker binary detected: %s", docker_exe)
-            else:
-                logger.info("Docker binary not found on PATH; will attempt local fallback")
-            # Prefer Docker sidecar if docker available
-            if docker_exe:
-                # Build container-invocation command using workspace-relative paths
-                cfg_rel = _rel_to_project(Path(config), cfg.project_root, label="config")
-                merged_rel = _rel_to_project(merged_resolved, cfg.project_root, label="Merged directory")
-                out_rel = _rel_to_project(out_resolved, cfg.project_root, label="Output directory")
-
-                runner_cmd = (
-                    "python3 -m src.training.awq_runner "
-                    f"--config '/workspace/{cfg_rel.as_posix()}' "
-                    f"--merged '/workspace/{merged_rel.as_posix()}' --out '/workspace/{out_rel.as_posix()}'"
-                )
-                if force:
-                    runner_cmd += " --force"
-                if gpu_enabled:
-                    runner_cmd += " --gpu"
-
-                docker_cmd = [
-                    "docker",
-                    "compose",
-                    "run",
-                    "--rm",
-                    "--no-deps",
-                    "-T",
-                    "awq-runner",
-                    "bash",
-                    "-lc",
-                    runner_cmd,
-                ]
-                logger.info("Invoking awq-runner sidecar: %s", " ".join(docker_cmd))
-                proc = subprocess.run(docker_cmd)
-                if proc.returncode != 0:
-                    logger.error("awq-runner sidecar failed (rc=%d)", proc.returncode)
-                    raise typer.Exit(code=proc.returncode)
-                elapsed = time.perf_counter() - start_time
-                logger.info("awq-runner sidecar finished successfully in %.1fs", elapsed)
-            else:
-                # No Docker: try to run the runner locally
-                logger.info("Attempting local AWQ runner invocation (Docker unavailable).")
-                try:
-                    from src.training.awq_runner import main as awq_main
-
-                    args = [
-                        f"--config",
-                        str(config),
-                        "--merged",
-                        str(merged_resolved),
-                        "--out",
-                        str(out_resolved),
-                    ]
-                    if force:
-                        args.append("--force")
-                    if gpu_enabled:
-                        args.append("--gpu")
-                    logger.info("Calling inline awq_runner with args: %s", " ".join(args))
-                    rc = awq_main(args)
-                    if rc != 0:
-                        logger.error("Local awq runner failed (rc=%d)", rc)
-                        raise typer.Exit(code=rc)
-                    elapsed = time.perf_counter() - start_time
-                    logger.info("Local awq runner finished successfully in %.1fs", elapsed)
-                except Exception as exc:
-                    log_exception_with_locals(logger, "Local awq runner failed", exc)
-                    raise
-    finally:
-        finalize_logger(logger)
-
-
-
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -355,6 +177,29 @@ def _rel_to_project(path: Path, project_root: Path, *, label: str) -> Path:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+
+@app.command("convert-awq")
+def convert_awq(
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML."),
+    merged_dir: Optional[Path] = typer.Option(None, help="Merged model directory (defaults to outputs/*/merged)."),
+    output_dir: Optional[Path] = typer.Option(None, help="Where to store compressed model output."),
+    force: bool = typer.Option(False, help="Overwrite existing output if present."),
+    run_name: Optional[str] = typer.Option(None, help="Override run naming with an explicit slug."),
+    run_index: Optional[int] = typer.Option(None, help="Force the run counter (runX)."),
+) -> None:
+    """Run AWQ conversion using the shared conversion helper."""
+
+    from .awq_convert import run_convert_awq
+
+    run_convert_awq(
+        config_path=config,
+        merged_dir=merged_dir,
+        output_dir=output_dir,
+        force=force,
+        run_name=run_name,
+        run_index=run_index,
+    )
 
 
 @app.command("preprocess-sft")
@@ -409,7 +254,20 @@ def preprocess_sft(
     resume_mgr = ResumeManager(logger)
     resume_dir = resume_mgr.resolve(str(resume_from) if resume_from else None, output_dir)
 
-    preprocessor = DataPreprocessor(cfg.preprocess, cfg.train, cfg.paths, logger)
+    if cfg.preprocess.mode != "huggingface":
+        from ..preprocessing.drg_pipeline import RealDatasetPreprocessor
+
+        preprocessor = RealDatasetPreprocessor(
+            cfg.preprocess,
+            cfg.train,
+            cfg.paths,
+            logger,
+            project_root=cfg.project_root,
+        )
+    else:
+        from ..data.preprocess import DataPreprocessor
+
+        preprocessor = DataPreprocessor(cfg.preprocess, cfg.train, cfg.paths, logger)
     console_log = run_dir / "console.log"
     try:
         with tee_std_streams(console_log):
@@ -516,7 +374,14 @@ def finetune_sft(
     resume_mgr = ResumeManager(logger)
     resume_path = resume_mgr.resolve(str(resume_from) if resume_from else None, output_resolved)
 
-    trainer = SFTTrainerRunner(cfg.train, cfg.preprocess, logger, run_dir)
+    if cfg.preprocess.mode != "huggingface":
+        from ..training.drg_classifier import DRGClassificationTrainerRunner
+
+        trainer = DRGClassificationTrainerRunner(cfg.train, cfg.preprocess, logger, run_dir)
+    else:
+        from ..training.sft_trainer import SFTTrainerRunner
+
+        trainer = SFTTrainerRunner(cfg.train, cfg.preprocess, logger, run_dir)
     console_log = run_dir / "console.log"
     try:
         with tee_std_streams(console_log):
@@ -656,6 +521,8 @@ def eval_sft(
     run_info = _compute_run_info(cfg, run_name=run_name_override, run_index=run_index)
     _require_existing_outputs(cfg, run_info.name)
     outputs_root, _ = _ensure_run_dirs(cfg, run_info)
+
+    from ..eval.evaluator import Evaluator
 
     run_manager = RunManager(cfg, run_info=run_info)
     _, run_dir = run_manager.create_run_dir("eval")

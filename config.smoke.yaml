@@ -8,16 +8,44 @@ paths:
   run_metadata_file: logs/latest.txt
 
 preprocess:
-  dataset_name: tatsu-lab/alpaca
-  sample_size: 32
+  mode: real_drg
+  dataset_name: drg_letters_smoke
+  sample_size: full
   filter_langs:
     - en
   test_size: 0.2
   cutoff_len: 512
   seed: 215
   save_splits: true
-  max_workers: 2
+  max_workers: 1
   pack_sequences: false
+  real_data:
+    raw_dir: "\\\\pc-27327\Projets\DRG-Prediction\data\Extractions\RAW-JSON-SORTIE"
+    sample_dir: data/sample_real_data
+    use_sample_data: true
+    formatted_subdir: formatted_json
+    metadata_csv: null
+    keep_prefixes: []
+    outside_to_other: false
+    outside_label: "__OTHER__"
+    truncate_label_to: 4
+    tokenizer: hf-internal-testing/llama-tokenizer
+    min_tokens: 4
+    min_count: 1
+    test_size: 0.2
+    copy_splits: false
+    dataset_stub: drg_letters_smoke
+    oracle:
+      enabled: true
+      dsn: "${ORACLE_DSN}"
+      network_alias: "${ORACLE_NETWORK_ALIAS}"
+      user: "${ORACLE_USER}"
+      password_env: ORACLE_PASSWORD
+      batch_size: 128
+      debug_print_sql: false
+      debug_sql_dir: null
+      instant_client_dir: null
+      tns_admin: "${ORACLE_TNS_PATH}"
 
 train:
   base_model: Qwen/Qwen2.5-0.5B
@@ -56,9 +84,9 @@ eval:
   temperature: 0.7
   top_p: 0.9
   prompts:
-    - instruction: "Summarize the Alpaca dataset in one sentence."
-      language: en
-      max_sentences: 1
+  - instruction: "Give a one-sentence summary of the DRG letters dataset."
+    language: en
+    max_sentences: 1
   resume_from: null
 
 serve:

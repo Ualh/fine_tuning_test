@@ -259,16 +259,8 @@ if "%RUN_AWQ%"=="1" (
     )
 )
 if "%RUN_AWQ%"=="1" (
-    if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
-    call :capture_container_logs convert-awq awq-runner
-    set "CONFIG_POSIX=%CONFIG%"
-    set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
-    set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
-    set "RUNNER_BASE=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
-    if defined FORCE_AWQ set "RUNNER_BASE=!RUNNER_BASE! --force"
-    if "%AWQ_GPU_ENABLED%"=="1" set "RUNNER_BASE=!RUNNER_BASE! --gpu"
-    echo [CMD] !RUNNER_BASE!
-    call :compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!RUNNER_BASE!"
+    echo [AWQ] Launching convert-awq via Python orchestrator
+    call :run_awq_cli
     set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
     call :capture_container_logs convert-awq awq-runner
 )
@@ -290,16 +282,8 @@ if defined FORCE_AWQ set "RUN_AWQ=1"
 if "%AWQ_ENABLED%"=="1" set "RUN_AWQ=1"
 if "%RUN_AWQ%"=="1" (
     if not defined MERGED_DIR (echo [ERROR] MERGED_DIR not set in runtime; cannot run AWQ & exit /b 2)
-    call :capture_container_logs convert-awq awq-runner
-    set "CONFIG_POSIX=%CONFIG%"
-    set "CONFIG_POSIX=%CONFIG_POSIX:\=/%"
-    if not defined AWQ_OUTPUT_SUFFIX set "AWQ_OUTPUT_SUFFIX=awq"
-    set "OUT_REL=%MERGED_DIR%_%AWQ_OUTPUT_SUFFIX%"
-    set "RUNNER_BASE=python3 -m src.training.awq_runner --config /workspace/%CONFIG_POSIX% --merged /workspace/%MERGED_DIR% --out /workspace/!OUT_REL!"
-    if defined FORCE_AWQ set "RUNNER_BASE=!RUNNER_BASE! --force"
-    if "%AWQ_GPU_ENABLED%"=="1" set "RUNNER_BASE=!RUNNER_BASE! --gpu"
-    echo [CMD] !RUNNER_BASE!
-    call :compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!RUNNER_BASE!"
+    echo [AWQ] Launching convert-awq via Python orchestrator
+    call :run_awq_cli
     set "PIPELINE_EXIT_CODE=%ERRORLEVEL%"
     call :capture_container_logs convert-awq awq-runner
 ) else (
@@ -606,6 +590,28 @@ set "__PROJECT=%COMPOSE_PROJECT%"
 if not defined __PROJECT set "__PROJECT=%HOST_COMPOSE_PROJECT%"
 if not defined __PROJECT set "__PROJECT=sft"
 docker compose -p "!__PROJECT!" %*
+set "__STATUS=%ERRORLEVEL%"
+endlocal & exit /b %__STATUS%
+
+:run_awq_cli
+setlocal EnableExtensions EnableDelayedExpansion
+set "CONFIG_ABS=%CONFIG%"
+for %%I in ("%CONFIG%") do set "CONFIG_ABS=%%~fI"
+set "CONFIG_REL=!CONFIG_ABS:%_SCRIPT_DIR%=%!"
+if "!CONFIG_REL!"=="!CONFIG_ABS!" set "CONFIG_REL=%CONFIG%"
+set "CONFIG_REL=!CONFIG_REL:\=/!"
+set "CONFIG_REL=!CONFIG_REL:/./=!"   
+if "%CONFIG_REL%"=="" set "CONFIG_REL=config.yaml"
+set "CONFIG_CONTAINER=/workspace/%CONFIG_REL%"
+
+set "CLI_BASE=python3 -m src.cli.awq_entry --config '!CONFIG_CONTAINER!'"
+if defined FORCE_AWQ set "CLI_BASE=!CLI_BASE! --force"
+if defined RUN_NAME set "CLI_BASE=!CLI_BASE! --run-name '!RUN_NAME!'"
+if defined RUN_NUMBER set "CLI_BASE=!CLI_BASE! --run-index !RUN_NUMBER!"
+
+if "%DEBUG_PIPELINE%"=="1" echo [TRACE] AWQ container command: !CLI_BASE!
+echo [CMD] docker compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!CLI_BASE!"
+call :compose run --rm --no-deps -T awq-runner bash -lc "!RUN_ENV_EXPORT!!CLI_BASE!"
 set "__STATUS=%ERRORLEVEL%"
 endlocal & exit /b %__STATUS%
 

@@ -9,7 +9,7 @@ This document tracks the canonical naming convention for all pipeline artifacts,
 ```
 
 - `model_name`: sanitized slug built from the configured base model identifier. Primary source is `config.training.model_name_or_path`, falling back to `runtime.metadata['SERVED_MODEL_NAME']` and finally to the basename of the path on disk. Examples: `qwen2-7b`, `mistral-7b`.
-- `dataset_name`: slug extracted from the configured dataset identifier. Primary source is `config.data.dataset_name`. If unset, use the basename of the preprocess output directory (without `_full`/`_nX` suffix); fallback to `dataset`. Examples: `alpaca`, `alpaca-en`.
+- `dataset_name`: slug extracted from the configured dataset identifier. Primary source is `config.data.dataset_name`. If unset, use the basename of the preprocess output directory (without `_full`/`_nX` suffix); fallback to `dataset`. Examples: `drg_letters`, `drg_letters-debug`.
 - `dataset_size`: `full` when `sample_size` is `null`, `'full'`, or `"full"`. Otherwise `n{sample_size}` (e.g. `n2048`, `n32`).
 - `runX`: incrementing counter (`run1`, `run2`, …) scoped by configuration (default: per model+dataset). The counter must avoid collisions by scanning existing directories.
 
@@ -72,10 +72,10 @@ This document tracks the canonical naming convention for all pipeline artifacts,
 
 | Model                | Dataset      | Sample size | Scope           | Result                    |
 |----------------------|--------------|-------------|-----------------|---------------------------|
-| `Qwen2-7B`           | `alpaca`     | `full`      | `model_dataset` | `qwen2-7b-alpaca-full-run1`|
-| `mistral-7b`         | `alpaca-en`  | `2048`      | `model_dataset` | `mistral-7b-alpaca-en-n2048-run2`|
+| `Qwen2-7B`           | `drg_letters`| `full`      | `model_dataset` | `qwen2-7b-drg_letters-full-run1`|
+| `mistral-7b`         | `drg_letters-debug`  | `2048`      | `model_dataset` | `mistral-7b-drg_letters-debug-n2048-run2`|
 | `phi-3-medium`       | *(missing)*  | `32`        | `model`         | `phi-3-medium-dataset-n32-run5`|
-| `meta/llama-3-8b`    | `alpaca full`| `null`      | `global`        | `meta-llama-3-8b-alpaca-full-run17`|
+| `meta/llama-3-8b`    | `drg_letters full`| `null`      | `global`        | `meta-llama-3-8b-drg_letters-full-run17`|
 
 ## Open Questions
 

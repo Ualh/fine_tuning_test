@@ -192,7 +192,9 @@ class SFTTrainerRunner:
             output_dir=str(output_dir / "trainer_state"),
             num_train_epochs=self.config.epochs,
             per_device_train_batch_size=self.config.batch_size,
-            per_device_eval_batch_size=max(1, self.config.batch_size // 2),
+            per_device_eval_batch_size=self.config.eval_batch_size
+            if self.config.eval_batch_size
+            else max(1, self.config.batch_size // 2),
             gradient_accumulation_steps=self.config.gradient_accumulation,
             learning_rate=self.config.learning_rate,
             lr_scheduler_type=self.config.lr_scheduler,
